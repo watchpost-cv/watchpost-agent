@@ -32,6 +32,10 @@ WP-A06 completes the first useful path: approval is collected by either control
 surface, Linux CPU/memory/root-filesystem/uptime telemetry is sent immediately,
 and the service repeats collection every minute with durable sample sequencing.
 
+WP-A07 moves connection identity into the post-owned model. Watchpost lists
+agents as monitoring details under posts, including hostname, platform and
+health; an agent is never represented as another post.
+
 This is a living handover for working effectively in a Nift project.
 
 Canonical version:

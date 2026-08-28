@@ -13,5 +13,26 @@
 - **WP-A06 — complete journey — complete:** web and CLI pairing, first telemetry, restart
   recovery and explicit failure states.
 
-Later checkpoints add configurable collectors, dense fleet visualisation,
-device methods, lifecycle completion, release packaging and hardening.
+- **WP-A07 — post-owned connections:** expose installed agents as monitoring
+  details beneath posts; never create duplicate inventory.
+- **WP-A08 — collector profiles:** validated CPU, memory, filesystem, load and
+  uptime configuration through equal website and CLI operations.
+- **WP-A09 — reliable delivery:** bounded durable queue, ordered replay,
+  exponential retry and explicit loss across restart.
+- **WP-A10 — lifecycle and health:** healthy, stale, offline, partial, rejected,
+  revoked and unpaired states plus revoke, unpair and reset operations.
+- **WP-A11 — dense survey:** compact visual health bars and trends across many
+  posts, with accessible numeric values and responsive layouts.
+- **WP-A12 — policy-aware status:** connect signals to starter rules and show
+  safe, warning, critical, unknown and maintenance state without hiding cause.
+- **WP-A13 — central checks:** scheduled HTTP, TCP, TLS, DNS and ICMP methods.
+- **WP-A14 — device methods:** durable read-only SNMP profiles and adapter
+  boundary for non-host devices.
+- **WP-A15 — broader device evidence:** UPS, PDU, environmental and storage
+  profiles with explicit quality and freshness.
+- **WP-A16 — lifecycle completion:** upgrade, credential rotation, move,
+  archive, delete, reset and uninstall journeys.
+- **WP-A17 — packaging and scale:** release artifacts, installers, many-post
+  dogfood and bounded resource evidence.
+- **WP-A18 — hardening:** recovery, hostile input, accessibility, platform and
+  release evidence without overstating production readiness.
