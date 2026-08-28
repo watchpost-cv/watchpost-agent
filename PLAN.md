@@ -21,7 +21,7 @@
   exponential retry and explicit loss across restart.
 - **WP-A10 — lifecycle and health — complete:** healthy, stale, offline, partial, rejected,
   revoked and unpaired states plus revoke, unpair and reset operations.
-- **WP-A11 — dense survey:** compact visual health bars and trends across many
+- **WP-A11 — dense survey — complete:** compact visual health bars and trends across many
   posts, with accessible numeric values and responsive layouts.
 - **WP-A12 — policy-aware status:** connect signals to starter rules and show
   safe, warning, critical, unknown and maintenance state without hiding cause.

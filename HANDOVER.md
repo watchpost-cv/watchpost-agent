@@ -50,6 +50,10 @@ the agent can unpair while retaining local setup, or reset only after exact
 installation-ID confirmation. Connection health distinguishes never connected,
 healthy, stale, offline, skewed, partial, rejected and revoked.
 
+WP-A11 is implemented in Watchpost's resource survey: compact two-column cards,
+dominant green/amber/red/grey health bars, trends, numbers, connection state,
+filtering and attention/name/resource ordering collapse responsively on mobile.
+
 This is a living handover for working effectively in a Nift project.
 
 Canonical version:
