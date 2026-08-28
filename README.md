@@ -41,6 +41,10 @@ then restarts the service. An unpaired service is a supported quiet state. Use
 `./watchpost-agent uninstall` (or `--system`) to remove the service and installed
 binary; private state is retained for explicit recovery or reset.
 
+Use `./watchpost-agent upgrade` after replacing the downloaded executable.
+It atomically replaces the stable installed binary and restarts the service
+without changing installation identity, local configuration, queue or pairing.
+
 The local website requires a seven-character-or-longer administrator password.
 For a headless server, configure the same state without exposing the password
 in process arguments:
@@ -81,3 +85,12 @@ Configure the same collectors from the local website or on a server:
 
 Intervals are bounded to 15–3600 seconds and filesystem paths must be unique,
 absolute, and limited to eight.
+
+Rotate the post-scoped credential from either the lifecycle panel or CLI:
+
+```sh
+./watchpost-agent rotate
+```
+
+Moving an installation to another post is deliberately an unpair/new-approval
+journey. Archiving or deleting a post never silently moves remote authority.

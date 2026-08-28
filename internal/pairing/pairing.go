@@ -129,6 +129,33 @@ func (c *Client) Poll(ctx context.Context) (Status, error) {
 	}
 	return Status{State: result.State, Phrase: pending.Phrase, ExpiresAt: pending.ExpiresAt, PostID: result.PostID}, nil
 }
+func (c *Client) Rotate(ctx context.Context) error {
+	current := c.state.Snapshot()
+	if current.Connection.Credential == "" {
+		return errors.New("agent is not paired")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, current.Connection.WatchpostURL+"/api/agent/v2/rotate", nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+current.Connection.Credential)
+	request.Header.Set("X-Watchpost-Installation", current.InstallationID)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("Watchpost rejected credential rotation (%d)", response.StatusCode)
+	}
+	var result struct {
+		Credential string `json:"credential"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&result); err != nil || result.Credential == "" {
+		return errors.New("invalid rotation response")
+	}
+	return c.state.Update(func(value *state.State) error { value.Connection.Credential = result.Credential; return nil })
+}
 
 func safeURL(value string) error {
 	parsed, err := url.Parse(value)

@@ -68,6 +68,9 @@ profiles belong beneath device posts and never persist polling passwords.
 WP-A15 adds central bounded starter profiles for network, UPS/PDU,
 environmental and storage evidence. Device readings explicitly carry quality,
 observation time and freshness; this work does not expand agent authority.
+WP-A16 adds atomic service upgrade and post-scoped credential rotation to both
+web and CLI. Upgrade preserves all state. Move is intentionally unpair then
+new approval. Uninstall retains private state; reset is the destructive path.
 
 This is a living handover for working effectively in a Nift project.
 

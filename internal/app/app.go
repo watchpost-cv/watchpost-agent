@@ -39,6 +39,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/collectors", a.require(a.collectorConfig))
 	mux.HandleFunc("PUT /api/v1/collectors", a.require(a.collectorConfig))
 	mux.HandleFunc("POST /api/v1/unpair", a.require(a.unpair))
+	mux.HandleFunc("POST /api/v1/rotate", a.require(a.rotate))
 	mux.HandleFunc("POST /api/v1/reset", a.require(a.reset))
 	mux.Handle("/", http.FileServer(http.FS(a.assets)))
 	return headers(mux)
@@ -210,6 +211,13 @@ func (a *App) collectorConfig(w http.ResponseWriter, r *http.Request) {
 func (a *App) unpair(w http.ResponseWriter, r *http.Request) {
 	if err := a.state.Unpair(); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "could not clear connection"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+func (a *App) rotate(w http.ResponseWriter, r *http.Request) {
+	if err := a.pairing.Rotate(r.Context()); err != nil {
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -33,10 +33,10 @@ func main() {
 }
 
 func run(arguments []string) error {
-	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure" || arguments[0] == "unpair" || arguments[0] == "reset") {
+	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure" || arguments[0] == "rotate" || arguments[0] == "unpair" || arguments[0] == "reset") {
 		return localCommand(arguments[0], arguments[1:])
 	}
-	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "status" || arguments[0] == "uninstall") {
+	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "upgrade" || arguments[0] == "status" || arguments[0] == "uninstall") {
 		return serviceCommand(arguments[0], arguments[1:])
 	}
 	flags := flag.NewFlagSet("watchpost-agent", flag.ContinueOnError)
@@ -187,6 +187,12 @@ func localCommand(action string, arguments []string) error {
 		}
 		fmt.Println("Agent unpaired. Local configuration and administrator retained.")
 		return nil
+	case "rotate":
+		if err := pairing.New(store, version).Rotate(context.Background()); err != nil {
+			return err
+		}
+		fmt.Println("Post-scoped credential rotated atomically.")
+		return nil
 	case "reset":
 		if *confirm == "" {
 			return fmt.Errorf("--confirm with the installation ID is required")
@@ -216,6 +222,12 @@ func serviceCommand(action string, arguments []string) error {
 	manager := service.New()
 	switch action {
 	case "install":
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		return manager.Install(executable, paths)
+	case "upgrade":
 		executable, err := os.Executable()
 		if err != nil {
 			return err
