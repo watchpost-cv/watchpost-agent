@@ -1,7 +1,7 @@
 # HANDOVER.md
 v0.0.5
 
-Project status: WP-A01–WP-A02 are complete. Watchpost Agent is a separate
+Project status: WP-A01–WP-A03 are complete. Watchpost Agent is a separate
 program with its own embedded, loopback-first website and an equivalent CLI for
 servers and automation. It is installed before pairing. The frontend and CLI
 must call the same application service and persist the same state. Read
@@ -12,6 +12,11 @@ WP-A02 provides `cmd/watchpost-agent`, a durable private installation UUID,
 atomic JSON persistence, health/status endpoints and the embedded Nift-built
 unpaired interface. Preserve the invariant that an unpaired agent is a quiet,
 valid state.
+
+WP-A03 adds idempotent Linux systemd installation before pairing, with per-user
+defaults, explicit `--system`, atomic executable/unit replacement and restart
+on upgrade. Uninstall deliberately retains private state; reset is a separate
+lifecycle operation.
 
 This is a living handover for working effectively in a Nift project.
 

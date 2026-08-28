@@ -21,3 +21,22 @@ with `--data-dir` or `WATCHPOST_AGENT_DATA_DIR`.
 
 WP-A02 establishes the restart-safe unpaired application. Installation,
 security and pairing arrive in WP-A03–WP-A06.
+
+Install the per-user service before pairing:
+
+```sh
+./watchpost-agent install
+./watchpost-agent status
+```
+
+For a deliberate machine-wide service, run as an appropriately privileged
+administrator:
+
+```sh
+sudo ./watchpost-agent install --system
+```
+
+Installation is idempotent and atomically replaces the installed executable,
+then restarts the service. An unpaired service is a supported quiet state. Use
+`./watchpost-agent uninstall` (or `--system`) to remove the service and installed
+binary; private state is retained for explicit recovery or reset.

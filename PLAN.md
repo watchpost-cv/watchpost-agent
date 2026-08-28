@@ -4,8 +4,8 @@
   install-before-pair and dual web/CLI boundaries.
 - **WP-A02 — application — complete:** Go executable, durable state and
   embedded Nift UI; installation identity survives restart.
-- **WP-A03 — installation:** safe per-user/system installation in an unpaired
-  state, atomic upgrades and service lifecycle.
+- **WP-A03 — installation — complete:** safe per-user/system installation in
+  an unpaired state, atomic upgrades and service lifecycle.
 - **WP-A04 — local security:** loopback default, authenticated session, Origin,
   CSRF, rate limits and equivalent CLI operations.
 - **WP-A05 — pairing v2:** request/approval, matching phrase, expiry, polling,

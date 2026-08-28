@@ -14,6 +14,7 @@ import (
 
 	agentassets "github.com/watchpost-ops/watchpost-agent"
 	"github.com/watchpost-ops/watchpost-agent/internal/app"
+	"github.com/watchpost-ops/watchpost-agent/internal/service"
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
 )
 
@@ -27,6 +28,9 @@ func main() {
 }
 
 func run(arguments []string) error {
+	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "status" || arguments[0] == "uninstall") {
+		return serviceCommand(arguments[0], arguments[1:])
+	}
 	flags := flag.NewFlagSet("watchpost-agent", flag.ContinueOnError)
 	listen := flags.String("listen", "127.0.0.1:8090", "local agent UI address")
 	dataDir := flags.String("data-dir", defaultDataDir(), "private agent data directory")
@@ -59,6 +63,27 @@ func run(arguments []string) error {
 		return nil
 	}
 	return err
+}
+
+func serviceCommand(action string, arguments []string) error {
+	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)
+	system := flags.Bool("system", false, "manage a system-wide service")
+	if err := flags.Parse(arguments); err != nil { return err }
+	if flags.NArg() != 0 { return fmt.Errorf("unexpected service arguments") }
+	paths, err := service.Resolve(*system)
+	if err != nil { return err }
+	manager := service.New()
+	switch action {
+	case "install":
+		executable, err := os.Executable()
+		if err != nil { return err }
+		return manager.Install(executable, paths)
+	case "status":
+		return manager.Status(paths)
+	case "uninstall":
+		return manager.Uninstall(paths)
+	}
+	return fmt.Errorf("unknown service action")
 }
 
 func defaultDataDir() string {
