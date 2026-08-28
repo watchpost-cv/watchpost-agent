@@ -113,6 +113,12 @@ func (m *Manager) Logout(token string) {
 	delete(m.sessions, token)
 	m.mu.Unlock()
 }
+func (m *Manager) ClearSessions() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions = map[string]sessionRecord{}
+	m.failures = nil
+}
 
 func WithSession(ctx context.Context, session Session) context.Context {
 	return context.WithValue(ctx, contextKey{}, session)

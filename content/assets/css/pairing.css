@@ -13,3 +13,4 @@
 .collector-toggles label { display: flex; align-items: center; gap: 9px; margin: 0; }
 .collector-toggles input { width: auto; accent-color: var(--accent); }
 @media(max-width:560px){.collector-toggles{grid-template-columns:1fr}}
+.reset-form{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}button.danger{background:#713d37;border-color:#98554d;color:var(--text)}

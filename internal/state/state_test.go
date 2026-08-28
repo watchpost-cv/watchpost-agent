@@ -39,3 +39,36 @@ func TestCollectorConfigValidation(t *testing.T) {
 		t.Fatal("accepted relative filesystem")
 	}
 }
+
+func TestUnpairAndResetAreDistinct(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := store.Snapshot().InstallationID
+	if err = store.Update(func(value *State) error {
+		value.Connection = Connection{Credential: "secret", PostID: "post"}
+		value.LocalAuth = LocalAuth{PasswordHash: "hash"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Unpair(); err != nil {
+		t.Fatal(err)
+	}
+	after := store.Snapshot()
+	if after.Connection.Credential != "" || after.LocalAuth.PasswordHash == "" {
+		t.Fatal("unpair crossed local auth boundary")
+	}
+	if store.Reset("wrong") == nil {
+		t.Fatal("reset accepted wrong confirmation")
+	}
+	if err = store.Reset(id); err != nil {
+		t.Fatal(err)
+	}
+	after = store.Snapshot()
+	if after.LocalAuth.PasswordHash != "" || after.InstallationID != id {
+		t.Fatal("reset did not preserve installation identity boundary")
+	}
+}

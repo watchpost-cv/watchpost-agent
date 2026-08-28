@@ -145,6 +145,30 @@ func (s *Store) Update(update func(*State) error) error {
 	return nil
 }
 
+func (s *Store) Unpair() error {
+	return s.Update(func(value *State) error {
+		value.Connection = Connection{}
+		value.PendingPairing = PendingPairing{}
+		value.NextSequence = 1
+		value.Delivery = DeliveryState{}
+		return nil
+	})
+}
+func (s *Store) Reset(confirm string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if confirm != s.data.InstallationID {
+		return errors.New("installation ID confirmation does not match")
+	}
+	previous := s.data
+	s.data = State{Version: Version, InstallationID: previous.InstallationID, CreatedAt: previous.CreatedAt, Collectors: DefaultCollectorConfig(), NextSequence: 1}
+	if err := s.saveLocked(); err != nil {
+		s.data = previous
+		return err
+	}
+	return nil
+}
+
 func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err

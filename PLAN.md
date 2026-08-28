@@ -19,7 +19,7 @@
   uptime configuration through equal website and CLI operations.
 - **WP-A09 — reliable delivery — complete:** bounded durable queue, ordered replay,
   exponential retry and explicit loss across restart.
-- **WP-A10 — lifecycle and health:** healthy, stale, offline, partial, rejected,
+- **WP-A10 — lifecycle and health — complete:** healthy, stale, offline, partial, rejected,
   revoked and unpaired states plus revoke, unpair and reset operations.
 - **WP-A11 — dense survey:** compact visual health bars and trends across many
   posts, with accessible numeric values and responsive layouts.

@@ -33,7 +33,7 @@ func main() {
 }
 
 func run(arguments []string) error {
-	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure") {
+	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure" || arguments[0] == "unpair" || arguments[0] == "reset") {
 		return localCommand(arguments[0], arguments[1:])
 	}
 	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "status" || arguments[0] == "uninstall") {
@@ -108,6 +108,7 @@ func localCommand(action string, arguments []string) error {
 	load := flags.Bool("load", true, "collect one-minute load")
 	uptime := flags.Bool("uptime", true, "collect uptime")
 	filesystems := flags.String("filesystems", "/", "comma-separated absolute filesystem paths")
+	confirm := flags.String("confirm", "", "installation ID confirmation for reset")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -179,6 +180,21 @@ func localCommand(action string, arguments []string) error {
 			return err
 		}
 		fmt.Printf("Collectors updated: every %d seconds.\n", config.IntervalSeconds)
+		return nil
+	case "unpair":
+		if err := store.Unpair(); err != nil {
+			return err
+		}
+		fmt.Println("Agent unpaired. Local configuration and administrator retained.")
+		return nil
+	case "reset":
+		if *confirm == "" {
+			return fmt.Errorf("--confirm with the installation ID is required")
+		}
+		if err := store.Reset(*confirm); err != nil {
+			return err
+		}
+		fmt.Println("Agent reset. Run local setup before using the website again.")
 		return nil
 	}
 	return fmt.Errorf("unknown local action")

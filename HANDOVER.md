@@ -45,6 +45,11 @@ WP-A09 queues versioned batches atomically before transport, caps the queue at
 backs off to five minutes. Full queues skip collection explicitly and increment
 a visible loss counter rather than manufacturing continuity.
 
+WP-A10 aligns Watchpost and agent lifecycle: Watchpost can revoke authority;
+the agent can unpair while retaining local setup, or reset only after exact
+installation-ID confirmation. Connection health distinguishes never connected,
+healthy, stale, offline, skewed, partial, rejected and revoked.
+
 This is a living handover for working effectively in a Nift project.
 
 Canonical version:
