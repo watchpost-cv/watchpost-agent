@@ -41,9 +41,9 @@ func Resolve(system bool) (Paths, error) {
 		return Paths{}, err
 	}
 	return Paths{
-		Binary: filepath.Join(home, ".local", "lib", "watchpost-agent", "watchpost-agent"),
+		Binary:  filepath.Join(home, ".local", "lib", "watchpost-agent", "watchpost-agent"),
 		DataDir: filepath.Join(home, ".local", "share", "watchpost-agent"),
-		Unit: filepath.Join(home, ".config", "systemd", "user", "watchpost-agent.service"),
+		Unit:    filepath.Join(home, ".config", "systemd", "user", "watchpost-agent.service"),
 	}, nil
 }
 

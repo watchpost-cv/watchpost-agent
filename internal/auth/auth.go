@@ -52,7 +52,9 @@ func (m *Manager) Setup(password string) error {
 			return errors.New("local setup already completed")
 		}
 		salt, err := token(16)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		current.LocalAuth = state.LocalAuth{Salt: salt, PasswordHash: passwordHash(password, salt)}
 		return nil
 	})
@@ -62,20 +64,32 @@ func (m *Manager) Login(password string) (Session, error) {
 	m.mu.Lock()
 	cutoff := time.Now().Add(-5 * time.Minute)
 	recent := m.failures[:0]
-	for _, failure := range m.failures { if failure.After(cutoff) { recent = append(recent, failure) } }
+	for _, failure := range m.failures {
+		if failure.After(cutoff) {
+			recent = append(recent, failure)
+		}
+	}
 	m.failures = recent
 	blocked := len(m.failures) >= 5
 	m.mu.Unlock()
-	if blocked { return Session{}, errors.New("login temporarily throttled") }
+	if blocked {
+		return Session{}, errors.New("login temporarily throttled")
+	}
 	configured := m.state.Snapshot().LocalAuth
 	if configured.PasswordHash == "" || subtle.ConstantTimeCompare([]byte(passwordHash(password, configured.Salt)), []byte(configured.PasswordHash)) != 1 {
-		m.mu.Lock(); m.failures = append(m.failures, time.Now()); m.mu.Unlock()
+		m.mu.Lock()
+		m.failures = append(m.failures, time.Now())
+		m.mu.Unlock()
 		return Session{}, errors.New("invalid credentials")
 	}
 	sessionToken, err := token(32)
-	if err != nil { return Session{}, err }
+	if err != nil {
+		return Session{}, err
+	}
 	csrf, err := token(24)
-	if err != nil { return Session{}, err }
+	if err != nil {
+		return Session{}, err
+	}
 	m.mu.Lock()
 	m.failures = nil
 	m.sessions[sessionToken] = sessionRecord{CSRF: csrf, Expires: time.Now().Add(24 * time.Hour)}
@@ -95,7 +109,9 @@ func (m *Manager) Authenticate(token string) (Session, bool) {
 }
 
 func (m *Manager) Logout(token string) {
-	m.mu.Lock(); delete(m.sessions, token); m.mu.Unlock()
+	m.mu.Lock()
+	delete(m.sessions, token)
+	m.mu.Unlock()
 }
 
 func WithSession(ctx context.Context, session Session) context.Context {
@@ -118,7 +134,9 @@ func passwordHash(password, salt string) string {
 
 func token(size int) (string, error) {
 	value := make([]byte, size)
-	if _, err := rand.Read(value); err != nil { return "", err }
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
 	return hex.EncodeToString(value), nil
 }
 

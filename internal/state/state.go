@@ -20,11 +20,11 @@ type Connection struct {
 }
 
 type PendingPairing struct {
-	WatchpostURL string `json:"watchpost_url,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	RequestSecret string `json:"request_secret,omitempty"`
-	Phrase string `json:"phrase,omitempty"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	WatchpostURL  string    `json:"watchpost_url,omitempty"`
+	RequestID     string    `json:"request_id,omitempty"`
+	RequestSecret string    `json:"request_secret,omitempty"`
+	Phrase        string    `json:"phrase,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at,omitempty"`
 }
 
 type LocalAuth struct {
@@ -33,13 +33,13 @@ type LocalAuth struct {
 }
 
 type State struct {
-	Version        int        `json:"version"`
-	InstallationID string     `json:"installation_id"`
-	CreatedAt      time.Time  `json:"created_at"`
-	Connection     Connection `json:"connection"`
+	Version        int            `json:"version"`
+	InstallationID string         `json:"installation_id"`
+	CreatedAt      time.Time      `json:"created_at"`
+	Connection     Connection     `json:"connection"`
 	PendingPairing PendingPairing `json:"pending_pairing"`
-	NextSequence   int64 `json:"next_sequence"`
-	LocalAuth      LocalAuth  `json:"local_auth"`
+	NextSequence   int64          `json:"next_sequence"`
+	LocalAuth      LocalAuth      `json:"local_auth"`
 }
 
 type Store struct {

@@ -22,7 +22,7 @@ type App struct {
 }
 
 func New(store *state.Store, version string, assets fs.FS) *App {
-	return &App{state: store, auth: auth.New(store), version: version, assets: assets, pairing: pairing.New(store,version)}
+	return &App{state: store, auth: auth.New(store), version: version, assets: assets, pairing: pairing.New(store, version)}
 }
 
 func (a *App) Handler() http.Handler {
@@ -52,25 +52,47 @@ func (a *App) bootstrap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) setup(w http.ResponseWriter, r *http.Request) {
-	if !sameOrigin(r) { writeJSON(w, 403, map[string]string{"error": "origin check failed"}); return }
-	var input struct{ Password string `json:"password"` }
-	if !decode(w, r, &input) { return }
-	if err := a.auth.Setup(input.Password); err != nil { writeJSON(w, 409, map[string]string{"error": err.Error()}); return }
+	if !sameOrigin(r) {
+		writeJSON(w, 403, map[string]string{"error": "origin check failed"})
+		return
+	}
+	var input struct {
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	if err := a.auth.Setup(input.Password); err != nil {
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
-	if !sameOrigin(r) { writeJSON(w, 403, map[string]string{"error": "origin check failed"}); return }
-	var input struct{ Password string `json:"password"` }
-	if !decode(w, r, &input) { return }
+	if !sameOrigin(r) {
+		writeJSON(w, 403, map[string]string{"error": "origin check failed"})
+		return
+	}
+	var input struct {
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
 	session, err := a.auth.Login(input.Password)
-	if err != nil { writeJSON(w, 401, map[string]string{"error": "invalid credentials"}); return }
+	if err != nil {
+		writeJSON(w, 401, map[string]string{"error": "invalid credentials"})
+		return
+	}
 	http.SetCookie(w, auth.Cookie(r, session))
 	writeJSON(w, 200, map[string]string{"csrf_token": session.CSRF})
 }
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie("watchpost_agent_session"); err == nil { a.auth.Logout(cookie.Value) }
+	if cookie, err := r.Cookie("watchpost_agent_session"); err == nil {
+		a.auth.Logout(cookie.Value)
+	}
 	http.SetCookie(w, &http.Cookie{Name: "watchpost_agent_session", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -78,11 +100,20 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 func (a *App) require(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("watchpost_agent_session")
-		if err != nil { writeJSON(w, 401, map[string]string{"error": "authentication required"}); return }
+		if err != nil {
+			writeJSON(w, 401, map[string]string{"error": "authentication required"})
+			return
+		}
 		session, ok := a.auth.Authenticate(cookie.Value)
-		if !ok { writeJSON(w, 401, map[string]string{"error": "authentication required"}); return }
+		if !ok {
+			writeJSON(w, 401, map[string]string{"error": "authentication required"})
+			return
+		}
 		if r.Method != http.MethodGet {
-			if !sameOrigin(r) || r.Header.Get("X-Watchpost-Agent-CSRF") != session.CSRF { writeJSON(w, 403, map[string]string{"error": "request verification failed"}); return }
+			if !sameOrigin(r) || r.Header.Get("X-Watchpost-Agent-CSRF") != session.CSRF {
+				writeJSON(w, 403, map[string]string{"error": "request verification failed"})
+				return
+			}
 		}
 		next(w, r.WithContext(auth.WithSession(r.Context(), session)))
 	}
@@ -92,15 +123,22 @@ func decode(w http.ResponseWriter, r *http.Request, value any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(value); err != nil { writeJSON(w, 400, map[string]string{"error": "invalid request"}); return false }
+	if err := decoder.Decode(value); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid request"})
+		return false
+	}
 	return true
 }
 
 func sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
-	if origin == "" { return true }
+	if origin == "" {
+		return true
+	}
 	scheme := "http"
-	if r.TLS != nil { scheme = "https" }
+	if r.TLS != nil {
+		scheme = "https"
+	}
 	return strings.EqualFold(origin, scheme+"://"+r.Host)
 }
 
@@ -114,9 +152,37 @@ func (a *App) status(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func pairingState(value state.State) string { if value.Connection.Credential!="" { return "paired" }; if value.PendingPairing.RequestID!="" { return "pending" }; return "unpaired" }
-func(a *App)requestPairing(w http.ResponseWriter,r *http.Request){var input struct{WatchpostURL string `json:"watchpost_url"`};if !decode(w,r,&input){return};result,err:=a.pairing.Request(r.Context(),input.WatchpostURL);if err!=nil{writeJSON(w,400,map[string]string{"error":err.Error()});return};writeJSON(w,201,result)}
-func(a *App)pollPairing(w http.ResponseWriter,r *http.Request){result,err:=a.pairing.Poll(r.Context());if err!=nil{writeJSON(w,409,map[string]string{"error":err.Error()});return};writeJSON(w,200,result)}
+func pairingState(value state.State) string {
+	if value.Connection.Credential != "" {
+		return "paired"
+	}
+	if value.PendingPairing.RequestID != "" {
+		return "pending"
+	}
+	return "unpaired"
+}
+func (a *App) requestPairing(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		WatchpostURL string `json:"watchpost_url"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := a.pairing.Request(r.Context(), input.WatchpostURL)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 201, result)
+}
+func (a *App) pollPairing(w http.ResponseWriter, r *http.Request) {
+	result, err := a.pairing.Poll(r.Context())
+	if err != nil {
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, result)
+}
 
 var runtimeHostname = os.Hostname
 
