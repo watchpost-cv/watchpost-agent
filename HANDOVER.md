@@ -59,6 +59,10 @@ active alert severity, maintenance, sample quality/freshness and connection
 health produce a visible state and reason. Starter rules are inspectable and
 pauseable; missing policy is unknown rather than healthy.
 
+WP-A13 is implemented centrally in Watchpost. Durable HTTP, TCP, TLS, DNS and
+ICMP schedules belong to posts and need no agent installation. The standalone
+agent remains the host-local monitoring method.
+
 This is a living handover for working effectively in a Nift project.
 
 Canonical version:
