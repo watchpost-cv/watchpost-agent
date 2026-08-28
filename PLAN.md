@@ -26,7 +26,7 @@
 - **WP-A12 — policy-aware status — complete:** connect signals to starter rules and show
   safe, warning, critical, unknown and maintenance state without hiding cause.
 - **WP-A13 — central checks — complete:** scheduled HTTP, TCP, TLS, DNS and ICMP methods.
-- **WP-A14 — device methods:** durable read-only SNMP profiles and adapter
+- **WP-A14 — device methods — complete:** durable read-only SNMP profiles and adapter
   boundary for non-host devices.
 - **WP-A15 — broader device evidence:** UPS, PDU, environmental and storage
   profiles with explicit quality and freshness.

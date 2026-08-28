@@ -62,6 +62,9 @@ pauseable; missing policy is unknown rather than healthy.
 WP-A13 is implemented centrally in Watchpost. Durable HTTP, TCP, TLS, DNS and
 ICMP schedules belong to posts and need no agent installation. The standalone
 agent remains the host-local monitoring method.
+WP-A14 registers SNMPv3 authPriv as Watchpost's first explicitly read-only
+device adapter. It is central rather than part of watchpost-agent; saved
+profiles belong beneath device posts and never persist polling passwords.
 
 This is a living handover for working effectively in a Nift project.
 
