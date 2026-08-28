@@ -2,6 +2,7 @@ package app
 
 import (
 	"io/fs"
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,9 +20,20 @@ func TestUnpairedStatusAndSecurityHeaders(t *testing.T) {
 	}
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
 	handler := New(store, "test", fs.FS(assets)).Handler()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"password":"1234567"}`))
+	request.Header.Set("Origin", "http://example.com")
+	request.Host = "example.com"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent { t.Fatalf("setup=%d %s", response.Code, response.Body.String()) }
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"password":"1234567"}`))
+	request.Header.Set("Origin", "http://example.com")
+	request.Host = "example.com"
+	response = httptest.NewRecorder(); handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 { t.Fatalf("login=%d %s", response.Code, response.Body.String()) }
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	request.AddCookie(response.Result().Cookies()[0])
+	response = httptest.NewRecorder(); handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"pairing":"unpaired"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}

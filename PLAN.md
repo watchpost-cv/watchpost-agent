@@ -6,8 +6,8 @@
   embedded Nift UI; installation identity survives restart.
 - **WP-A03 — installation — complete:** safe per-user/system installation in
   an unpaired state, atomic upgrades and service lifecycle.
-- **WP-A04 — local security:** loopback default, authenticated session, Origin,
-  CSRF, rate limits and equivalent CLI operations.
+- **WP-A04 — local security — complete:** loopback default, authenticated
+  session, Origin, CSRF, rate limits and equivalent CLI operations.
 - **WP-A05 — pairing v2:** request/approval, matching phrase, expiry, polling,
   credential issue and rotation.
 - **WP-A06 — complete journey:** web and CLI pairing, first telemetry, restart

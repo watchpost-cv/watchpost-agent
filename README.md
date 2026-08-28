@@ -40,3 +40,18 @@ Installation is idempotent and atomically replaces the installed executable,
 then restarts the service. An unpaired service is a supported quiet state. Use
 `./watchpost-agent uninstall` (or `--system`) to remove the service and installed
 binary; private state is retained for explicit recovery or reset.
+
+The local website requires a seven-character-or-longer administrator password.
+For a headless server, configure the same state without exposing the password
+in process arguments:
+
+```sh
+printf '%s\n' 'your password' > /secure/path/agent-password
+chmod 600 /secure/path/agent-password
+./watchpost-agent setup --password-file /secure/path/agent-password
+./watchpost-agent info --json
+```
+
+Remove the temporary password file according to your system's secret-handling
+policy. The UI binds to loopback by default and enforces authenticated sessions,
+same-origin state changes, CSRF tokens, request bounds and login throttling.

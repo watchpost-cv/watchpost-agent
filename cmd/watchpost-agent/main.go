@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -9,11 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	agentassets "github.com/watchpost-ops/watchpost-agent"
 	"github.com/watchpost-ops/watchpost-agent/internal/app"
+	"github.com/watchpost-ops/watchpost-agent/internal/auth"
 	"github.com/watchpost-ops/watchpost-agent/internal/service"
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
 )
@@ -28,6 +31,9 @@ func main() {
 }
 
 func run(arguments []string) error {
+	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info") {
+		return localCommand(arguments[0], arguments[1:])
+	}
 	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "status" || arguments[0] == "uninstall") {
 		return serviceCommand(arguments[0], arguments[1:])
 	}
@@ -63,6 +69,33 @@ func run(arguments []string) error {
 		return nil
 	}
 	return err
+}
+
+func localCommand(action string, arguments []string) error {
+	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)
+	dataDir := flags.String("data-dir", defaultDataDir(), "private agent data directory")
+	passwordFile := flags.String("password-file", "", "file containing the local UI password")
+	jsonOutput := flags.Bool("json", false, "print machine-readable status")
+	if err := flags.Parse(arguments); err != nil { return err }
+	if flags.NArg() != 0 { return fmt.Errorf("unexpected local command arguments") }
+	store, err := state.Open(filepath.Join(*dataDir, "agent.json"))
+	if err != nil { return err }
+	switch action {
+	case "setup":
+		if *passwordFile == "" { return fmt.Errorf("--password-file is required") }
+		password, err := os.ReadFile(*passwordFile)
+		if err != nil { return err }
+		if err = auth.New(store).Setup(strings.TrimRight(string(password), "\r\n")); err != nil { return err }
+		fmt.Println("Local agent administrator configured.")
+		return nil
+	case "info":
+		current := store.Snapshot()
+		result := map[string]any{"installation_id": current.InstallationID, "configured": current.LocalAuth.PasswordHash != "", "paired": current.Connection.Credential != "", "watchpost_url": current.Connection.WatchpostURL, "post_id": current.Connection.PostID}
+		if *jsonOutput { return json.NewEncoder(os.Stdout).Encode(result) }
+		fmt.Printf("Installation: %s\nConfigured: %t\nPaired: %t\nWatchpost: %s\nPost: %s\n", current.InstallationID, result["configured"], result["paired"], current.Connection.WatchpostURL, current.Connection.PostID)
+		return nil
+	}
+	return fmt.Errorf("unknown local action")
 }
 
 func serviceCommand(action string, arguments []string) error {

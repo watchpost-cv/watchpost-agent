@@ -19,11 +19,17 @@ type Connection struct {
 	Credential   string `json:"credential,omitempty"`
 }
 
+type LocalAuth struct {
+	Salt         string `json:"salt,omitempty"`
+	PasswordHash string `json:"password_hash,omitempty"`
+}
+
 type State struct {
 	Version        int        `json:"version"`
 	InstallationID string     `json:"installation_id"`
 	CreatedAt      time.Time  `json:"created_at"`
 	Connection     Connection `json:"connection"`
+	LocalAuth      LocalAuth  `json:"local_auth"`
 }
 
 type Store struct {
