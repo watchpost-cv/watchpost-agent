@@ -71,6 +71,9 @@ observation time and freshness; this work does not expand agent authority.
 WP-A16 adds atomic service upgrade and post-scoped credential rotation to both
 web and CLI. Upgrade preserves all state. Move is intentionally unpair then
 new approval. Uninstall retains private state; reset is the destructive path.
+WP-A17 adds checksum-verified Linux amd64/arm64 archives, a per-user/system
+installer and tag-triggered release workflow. Other platforms are not claimed.
+Watchpost bounds a 500-post/20,000-observation survey to 30 points per series.
 
 This is a living handover for working effectively in a Nift project.
 

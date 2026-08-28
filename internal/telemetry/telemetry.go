@@ -11,7 +11,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
@@ -197,13 +196,9 @@ func snapshot(config state.CollectorConfig) ([]metric, error) {
 		result = append(result, metric{"uptime.seconds", "seconds", value, map[string]string{}})
 	}
 	for _, path := range config.Filesystems {
-		var disk syscall.Statfs_t
-		if err := syscall.Statfs(path, &disk); err != nil {
+		value, err := filesystemPercent(path)
+		if err != nil {
 			return nil, fmt.Errorf("filesystem %s: %w", path, err)
-		}
-		value := 0.0
-		if disk.Blocks > 0 {
-			value = 100 * float64(disk.Blocks-disk.Bfree) / float64(disk.Blocks)
 		}
 		signal := "filesystem.percent"
 		if path == "/" {

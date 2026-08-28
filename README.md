@@ -15,6 +15,17 @@ go build -o watchpost-agent ./cmd/watchpost-agent
 ./watchpost-agent
 ```
 
+Release archives are produced with:
+
+```sh
+./packaging/build-release.sh v0.1.0
+```
+
+The public installer defaults to `~/.local/bin`; pass `--system` as root for
+`/usr/local/bin`. Both routes verify the selected archive against
+`SHA256SUMS` before installation. The current host collector and service
+package support Linux amd64/arm64; other platforms remain a hardening target.
+
 The local interface defaults to `http://127.0.0.1:8090`. The private state
 directory defaults to `~/.local/share/watchpost-agent` and can be overridden
 with `--data-dir` or `WATCHPOST_AGENT_DATA_DIR`.

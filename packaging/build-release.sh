@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+version=${1:?usage: build-release.sh VERSION [OUTPUT]}; output=${2:-dist}; root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd); case "$output" in /*) output_dir=$output;; *) output_dir="$root/$output";; esac; mkdir -p "$output_dir"; : > "$output_dir/SHA256SUMS"
+for target in linux-amd64 linux-arm64; do os=${target%-*}; arch=${target#*-}; suffix=; [ "$os" = windows ] && suffix=.exe; name="watchpost-agent-${version}-${target}"; binary="$output_dir/watchpost-agent$suffix"; (cd "$root" && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$binary" ./cmd/watchpost-agent); if [ "$os" = windows ]; then (cd "$output_dir" && zip -q "$name.zip" "watchpost-agent$suffix"); artifact="$name.zip"; else (cd "$output_dir" && tar -czf "$name.tar.gz" watchpost-agent); artifact="$name.tar.gz"; fi; (cd "$output_dir" && sha256sum "$artifact" >> SHA256SUMS); rm "$binary"; done

@@ -32,7 +32,7 @@
   profiles with explicit quality and freshness.
 - **WP-A16 — lifecycle completion — complete:** upgrade, credential rotation, move,
   archive, delete, reset and uninstall journeys.
-- **WP-A17 — packaging and scale:** release artifacts, installers, many-post
+- **WP-A17 — packaging and scale — complete:** release artifacts, installers, many-post
   dogfood and bounded resource evidence.
 - **WP-A18 — hardening:** recovery, hostile input, accessibility, platform and
   release evidence without overstating production readiness.
