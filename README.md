@@ -66,3 +66,7 @@ Pair from the local website, or use the equivalent flow on a headless server:
 The first command prints a short phrase. Approve that exact phrase in Watchpost,
 then run `pair-status` to retrieve and store the one-time credential. Both
 control surfaces use the same private state file.
+
+After approval, `pair-status` (or the website's **Check approval** button)
+retrieves the credential and immediately sends CPU, memory, root-filesystem and
+uptime signals. The running service repeats delivery every minute.

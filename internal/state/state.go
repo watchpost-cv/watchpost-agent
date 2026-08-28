@@ -38,6 +38,7 @@ type State struct {
 	CreatedAt      time.Time  `json:"created_at"`
 	Connection     Connection `json:"connection"`
 	PendingPairing PendingPairing `json:"pending_pairing"`
+	NextSequence   int64 `json:"next_sequence"`
 	LocalAuth      LocalAuth  `json:"local_auth"`
 }
 

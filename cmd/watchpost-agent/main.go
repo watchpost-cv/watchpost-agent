@@ -20,6 +20,7 @@ import (
 	"github.com/watchpost-ops/watchpost-agent/internal/pairing"
 	"github.com/watchpost-ops/watchpost-agent/internal/service"
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-ops/watchpost-agent/internal/telemetry"
 )
 
 var version = "dev"
@@ -63,6 +64,7 @@ func run(arguments []string) error {
 	server := &http.Server{Addr: *listen, Handler: app.New(store, version, public).Handler(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go deliveryLoop(ctx,store)
 	go func() { <-ctx.Done(); shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second); defer cancel(); _ = server.Shutdown(shutdown) }()
 	fmt.Printf("Watchpost Agent %s\nLocal interface: http://%s\n", version, *listen)
 	err = server.ListenAndServe()
@@ -71,6 +73,8 @@ func run(arguments []string) error {
 	}
 	return err
 }
+
+func deliveryLoop(ctx context.Context,store *state.Store){ticker:=time.NewTicker(time.Minute);defer ticker.Stop();for{select{case<-ctx.Done():return;case<-ticker.C:_=telemetry.Send(ctx,store)}}}
 
 func localCommand(action string, arguments []string) error {
 	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)

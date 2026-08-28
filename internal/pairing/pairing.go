@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-ops/watchpost-agent/internal/telemetry"
 )
 
 type Client struct { state *state.Store; version string; http *http.Client }
@@ -37,7 +38,7 @@ func(c *Client)Poll(ctx context.Context)(Status,error){
 	request,err:=http.NewRequestWithContext(ctx,http.MethodGet,pending.WatchpostURL+"/api/agent/v2/pairing-requests/"+url.PathEscape(pending.RequestID),nil);if err!=nil{return Status{},err};request.Header.Set("Authorization","Bearer "+pending.RequestSecret)
 	response,err:=c.http.Do(request);if err!=nil{return Status{},err};defer response.Body.Close();if response.StatusCode!=http.StatusOK{return Status{},fmt.Errorf("Watchpost pairing status failed (%d)",response.StatusCode)}
 	var result struct{State string `json:"state"`;PostID string `json:"post_id"`;CollectorID string `json:"collector_id"`;Credential string `json:"credential"`};if err=json.NewDecoder(response.Body).Decode(&result);err!=nil{return Status{},err}
-	if result.State=="approved" {if result.PostID==""||result.Credential==""{return Status{},errors.New("invalid pairing approval")};err=c.state.Update(func(value *state.State)error{value.Connection=state.Connection{WatchpostURL:pending.WatchpostURL,PostID:result.PostID,Credential:result.Credential};value.PendingPairing=state.PendingPairing{};return nil});if err!=nil{return Status{},err}}
+	if result.State=="approved" {if result.PostID==""||result.Credential==""{return Status{},errors.New("invalid pairing approval")};err=c.state.Update(func(value *state.State)error{value.Connection=state.Connection{WatchpostURL:pending.WatchpostURL,PostID:result.PostID,Credential:result.Credential};value.PendingPairing=state.PendingPairing{};value.NextSequence=1;return nil});if err!=nil{return Status{},err};if err=telemetry.Send(ctx,c.state);err!=nil{return Status{},fmt.Errorf("paired, but first telemetry failed: %w",err)}}
 	return Status{State:result.State,Phrase:pending.Phrase,ExpiresAt:pending.ExpiresAt,PostID:result.PostID},nil
 }
 

@@ -28,6 +28,10 @@ expire after ten minutes and show a matching phrase in both programs. Watchpost
 approval precedes one-time credential delivery; the request secret never leaves
 the agent state and the browser never receives it.
 
+WP-A06 completes the first useful path: approval is collected by either control
+surface, Linux CPU/memory/root-filesystem/uptime telemetry is sent immediately,
+and the service repeats collection every minute with durable sample sequencing.
+
 This is a living handover for working effectively in a Nift project.
 
 Canonical version:
