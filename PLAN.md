@@ -1,0 +1,16 @@
+# Watchpost Agent implementation plan
+
+- **WP-A01 — architecture:** freeze posts, monitoring methods, agent, collector,
+  install-before-pair and dual web/CLI boundaries.
+- **WP-A02 — application:** Go executable, durable state and embedded Nift UI.
+- **WP-A03 — installation:** safe per-user/system installation in an unpaired
+  state, atomic upgrades and service lifecycle.
+- **WP-A04 — local security:** loopback default, authenticated session, Origin,
+  CSRF, rate limits and equivalent CLI operations.
+- **WP-A05 — pairing v2:** request/approval, matching phrase, expiry, polling,
+  credential issue and rotation.
+- **WP-A06 — complete journey:** web and CLI pairing, first telemetry, restart
+  recovery and explicit failure states.
+
+Later checkpoints add configurable collectors, dense fleet visualisation,
+device methods, lifecycle completion, release packaging and hardening.
