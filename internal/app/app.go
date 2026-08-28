@@ -36,6 +36,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/status", a.require(a.status))
 	mux.HandleFunc("POST /api/v1/pairing/request", a.require(a.requestPairing))
 	mux.HandleFunc("POST /api/v1/pairing/poll", a.require(a.pollPairing))
+	mux.HandleFunc("GET /api/v1/collectors", a.require(a.collectorConfig))
+	mux.HandleFunc("PUT /api/v1/collectors", a.require(a.collectorConfig))
 	mux.Handle("/", http.FileServer(http.FS(a.assets)))
 	return headers(mux)
 }
@@ -182,6 +184,25 @@ func (a *App) pollPairing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, result)
+}
+func (a *App) collectorConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, 200, a.state.Snapshot().Collectors)
+		return
+	}
+	var input state.CollectorConfig
+	if !decode(w, r, &input) {
+		return
+	}
+	if err := input.Validate(); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := a.state.Update(func(value *state.State) error { value.Collectors = input; return nil }); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "collector configuration could not be saved"})
+		return
+	}
+	writeJSON(w, 200, input)
 }
 
 var runtimeHostname = os.Hostname

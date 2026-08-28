@@ -70,3 +70,14 @@ control surfaces use the same private state file.
 After approval, `pair-status` (or the website's **Check approval** button)
 retrieves the credential and immediately sends CPU, memory, root-filesystem and
 uptime signals. The running service repeats delivery every minute.
+
+Configure the same collectors from the local website or on a server:
+
+```sh
+./watchpost-agent configure --interval 60 \
+  --cpu=true --memory=true --load=true --uptime=true \
+  --filesystems /,/data
+```
+
+Intervals are bounded to 15–3600 seconds and filesystem paths must be unique,
+absolute, and limited to eight.

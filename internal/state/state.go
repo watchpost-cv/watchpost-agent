@@ -32,14 +32,47 @@ type LocalAuth struct {
 	PasswordHash string `json:"password_hash,omitempty"`
 }
 
+type CollectorConfig struct {
+	IntervalSeconds int      `json:"interval_seconds"`
+	CPU             bool     `json:"cpu"`
+	Memory          bool     `json:"memory"`
+	Load            bool     `json:"load"`
+	Uptime          bool     `json:"uptime"`
+	Filesystems     []string `json:"filesystems"`
+}
+
+func DefaultCollectorConfig() CollectorConfig {
+	return CollectorConfig{IntervalSeconds: 60, CPU: true, Memory: true, Load: true, Uptime: true, Filesystems: []string{"/"}}
+}
+func (c CollectorConfig) Validate() error {
+	if c.IntervalSeconds < 15 || c.IntervalSeconds > 3600 {
+		return errors.New("interval must be between 15 and 3600 seconds")
+	}
+	if !c.CPU && !c.Memory && !c.Load && !c.Uptime && len(c.Filesystems) == 0 {
+		return errors.New("at least one collector must be enabled")
+	}
+	if len(c.Filesystems) > 8 {
+		return errors.New("at most eight filesystems may be monitored")
+	}
+	seen := map[string]bool{}
+	for _, path := range c.Filesystems {
+		if !filepath.IsAbs(path) || len(path) > 255 || seen[path] {
+			return errors.New("filesystem paths must be unique absolute paths")
+		}
+		seen[path] = true
+	}
+	return nil
+}
+
 type State struct {
-	Version        int            `json:"version"`
-	InstallationID string         `json:"installation_id"`
-	CreatedAt      time.Time      `json:"created_at"`
-	Connection     Connection     `json:"connection"`
-	PendingPairing PendingPairing `json:"pending_pairing"`
-	NextSequence   int64          `json:"next_sequence"`
-	LocalAuth      LocalAuth      `json:"local_auth"`
+	Version        int             `json:"version"`
+	InstallationID string          `json:"installation_id"`
+	CreatedAt      time.Time       `json:"created_at"`
+	Connection     Connection      `json:"connection"`
+	PendingPairing PendingPairing  `json:"pending_pairing"`
+	NextSequence   int64           `json:"next_sequence"`
+	Collectors     CollectorConfig `json:"collectors"`
+	LocalAuth      LocalAuth       `json:"local_auth"`
 }
 
 type Store struct {
@@ -58,6 +91,12 @@ func Open(path string) (*Store, error) {
 		if json.Unmarshal(data, &s.data) != nil || s.data.Version != Version || s.data.InstallationID == "" {
 			return nil, errors.New("invalid agent state")
 		}
+		if s.data.Collectors.IntervalSeconds == 0 {
+			s.data.Collectors = DefaultCollectorConfig()
+			if err = s.saveLocked(); err != nil {
+				return nil, err
+			}
+		}
 		return s, nil
 	}
 	if !os.IsNotExist(err) {
@@ -67,7 +106,7 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.data = State{Version: Version, InstallationID: id, CreatedAt: time.Now().UTC()}
+	s.data = State{Version: Version, InstallationID: id, CreatedAt: time.Now().UTC(), Collectors: DefaultCollectorConfig()}
 	if err = s.saveLocked(); err != nil {
 		return nil, err
 	}

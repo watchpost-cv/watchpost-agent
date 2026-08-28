@@ -15,7 +15,7 @@
 
 - **WP-A07 — post-owned connections:** expose installed agents as monitoring
   details beneath posts; never create duplicate inventory.
-- **WP-A08 — collector profiles:** validated CPU, memory, filesystem, load and
+- **WP-A08 — collector profiles — complete:** validated CPU, memory, filesystem, load and
   uptime configuration through equal website and CLI operations.
 - **WP-A09 — reliable delivery:** bounded durable queue, ordered replay,
   exponential retry and explicit loss across restart.

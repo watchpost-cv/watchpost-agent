@@ -23,3 +23,19 @@ func TestInstallationIdentitySurvivesRestart(t *testing.T) {
 		t.Fatal("installation identity changed")
 	}
 }
+
+func TestCollectorConfigValidation(t *testing.T) {
+	valid := DefaultCollectorConfig()
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	valid.IntervalSeconds = 14
+	if valid.Validate() == nil {
+		t.Fatal("accepted interval below bound")
+	}
+	valid = DefaultCollectorConfig()
+	valid.Filesystems = []string{"relative"}
+	if valid.Validate() == nil {
+		t.Fatal("accepted relative filesystem")
+	}
+}

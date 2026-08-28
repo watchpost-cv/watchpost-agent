@@ -41,7 +41,7 @@ func Send(ctx context.Context, store *state.Store) error {
 		return errors.New("agent is not paired")
 	}
 	now := time.Now().UTC()
-	values, err := snapshot()
+	values, err := snapshot(current.Collectors)
 	if err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func Send(ctx context.Context, store *state.Store) error {
 	samples := make([]Sample, 0, len(values))
 	for _, value := range values {
 		copy := value.value
-		samples = append(samples, Sample{Sequence: sequence, ObservedAt: now, Signal: value.signal, Value: &copy, Unit: value.unit, Quality: "good", Labels: map[string]string{}})
+		samples = append(samples, Sample{Sequence: sequence, ObservedAt: now, Signal: value.signal, Value: &copy, Unit: value.unit, Quality: "good", Labels: value.labels})
 		sequence++
 	}
 	batch := Batch{Version: 1, PostID: current.Connection.PostID, CollectorID: current.InstallationID, BatchID: fmt.Sprintf("agent-%d", now.UnixNano()), SentAt: now, Samples: samples}
@@ -77,31 +77,60 @@ func Send(ctx context.Context, store *state.Store) error {
 type metric struct {
 	signal, unit string
 	value        float64
+	labels       map[string]string
 }
 
-func snapshot() ([]metric, error) {
-	cpu, err := cpuPercent()
-	if err != nil {
-		return nil, err
+func snapshot(config state.CollectorConfig) ([]metric, error) {
+	if config.IntervalSeconds == 0 {
+		config = state.DefaultCollectorConfig()
 	}
-	memory, err := memoryPercent()
-	if err != nil {
-		return nil, err
+	result := []metric{}
+	if config.CPU {
+		value, err := cpuPercent()
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, metric{"cpu.percent", "percent", value, map[string]string{}})
 	}
-	var disk syscall.Statfs_t
-	if err = syscall.Statfs("/", &disk); err != nil {
-		return nil, err
+	if config.Memory {
+		value, err := memoryPercent()
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, metric{"memory.percent", "percent", value, map[string]string{}})
 	}
-	diskPercent := 0.0
-	if disk.Blocks > 0 {
-		diskPercent = 100 * float64(disk.Blocks-disk.Bfree) / float64(disk.Blocks)
+	if config.Load {
+		data, err := os.ReadFile("/proc/loadavg")
+		if err != nil {
+			return nil, err
+		}
+		value, _ := strconv.ParseFloat(strings.Fields(string(data))[0], 64)
+		result = append(result, metric{"load.one", "load", value, map[string]string{}})
 	}
-	uptime, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return nil, err
+	if config.Uptime {
+		data, err := os.ReadFile("/proc/uptime")
+		if err != nil {
+			return nil, err
+		}
+		value, _ := strconv.ParseFloat(strings.Fields(string(data))[0], 64)
+		result = append(result, metric{"uptime.seconds", "seconds", value, map[string]string{}})
 	}
-	seconds, _ := strconv.ParseFloat(strings.Fields(string(uptime))[0], 64)
-	return []metric{{"cpu.percent", "percent", cpu}, {"memory.percent", "percent", memory}, {"disk.percent", "percent", diskPercent}, {"uptime.seconds", "seconds", seconds}}, nil
+	for _, path := range config.Filesystems {
+		var disk syscall.Statfs_t
+		if err := syscall.Statfs(path, &disk); err != nil {
+			return nil, fmt.Errorf("filesystem %s: %w", path, err)
+		}
+		value := 0.0
+		if disk.Blocks > 0 {
+			value = 100 * float64(disk.Blocks-disk.Bfree) / float64(disk.Blocks)
+		}
+		signal := "filesystem.percent"
+		if path == "/" {
+			signal = "disk.percent"
+		}
+		result = append(result, metric{signal, "percent", value, map[string]string{"path": path}})
+	}
+	return result, nil
 }
 func cpuPercent() (float64, error) {
 	idle1, total1, err := cpuTimes()

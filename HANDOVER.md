@@ -36,6 +36,10 @@ WP-A07 moves connection identity into the post-owned model. Watchpost lists
 agents as monitoring details under posts, including hostname, platform and
 health; an agent is never represented as another post.
 
+WP-A08 provides one validated collector profile to both control surfaces:
+15–3600-second intervals, CPU, memory, load, uptime and up to eight unique
+absolute filesystem paths. Changes are atomic and apply on the next interval.
+
 This is a living handover for working effectively in a Nift project.
 
 Canonical version:

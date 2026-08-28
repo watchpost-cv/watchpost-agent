@@ -33,7 +33,7 @@ func main() {
 }
 
 func run(arguments []string) error {
-	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status") {
+	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure") {
 		return localCommand(arguments[0], arguments[1:])
 	}
 	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "status" || arguments[0] == "uninstall") {
@@ -80,13 +80,17 @@ func run(arguments []string) error {
 }
 
 func deliveryLoop(ctx context.Context, store *state.Store) {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
 	for {
+		interval := store.Snapshot().Collectors.IntervalSeconds
+		if interval < 15 {
+			interval = 60
+		}
+		timer := time.NewTimer(time.Duration(interval) * time.Second)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			_ = telemetry.Send(ctx, store)
 		}
 	}
@@ -98,6 +102,12 @@ func localCommand(action string, arguments []string) error {
 	passwordFile := flags.String("password-file", "", "file containing the local UI password")
 	jsonOutput := flags.Bool("json", false, "print machine-readable status")
 	serverURL := flags.String("server", "", "Watchpost URL")
+	interval := flags.Int("interval", 60, "collection interval in seconds")
+	cpu := flags.Bool("cpu", true, "collect CPU utilisation")
+	memory := flags.Bool("memory", true, "collect memory utilisation")
+	load := flags.Bool("load", true, "collect one-minute load")
+	uptime := flags.Bool("uptime", true, "collect uptime")
+	filesystems := flags.String("filesystems", "/", "comma-separated absolute filesystem paths")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -152,6 +162,23 @@ func localCommand(action string, arguments []string) error {
 		if result.PostID != "" {
 			fmt.Printf("Post: %s\n", result.PostID)
 		}
+		return nil
+	case "configure":
+		paths := []string{}
+		for _, path := range strings.Split(*filesystems, ",") {
+			path = strings.TrimSpace(path)
+			if path != "" {
+				paths = append(paths, path)
+			}
+		}
+		config := state.CollectorConfig{IntervalSeconds: *interval, CPU: *cpu, Memory: *memory, Load: *load, Uptime: *uptime, Filesystems: paths}
+		if err := config.Validate(); err != nil {
+			return err
+		}
+		if err := store.Update(func(value *state.State) error { value.Collectors = config; return nil }); err != nil {
+			return err
+		}
+		fmt.Printf("Collectors updated: every %d seconds.\n", config.IntervalSeconds)
 		return nil
 	}
 	return fmt.Errorf("unknown local action")
