@@ -2,7 +2,8 @@
 
 - **WP-A01 — architecture:** freeze posts, monitoring methods, agent, collector,
   install-before-pair and dual web/CLI boundaries.
-- **WP-A02 — application:** Go executable, durable state and embedded Nift UI.
+- **WP-A02 — application — complete:** Go executable, durable state and
+  embedded Nift UI; installation identity survives restart.
 - **WP-A03 — installation:** safe per-user/system installation in an unpaired
   state, atomic upgrades and service lifecycle.
 - **WP-A04 — local security:** loopback default, authenticated session, Origin,
