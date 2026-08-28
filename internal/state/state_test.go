@@ -1,9 +1,20 @@
 package state
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestCorruptStateFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	if err := os.WriteFile(path, []byte("{broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil {
+		t.Fatal("corrupt state accepted")
+	}
+}
 
 func TestInstallationIdentitySurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.json")

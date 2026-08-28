@@ -34,5 +34,5 @@
   archive, delete, reset and uninstall journeys.
 - **WP-A17 — packaging and scale — complete:** release artifacts, installers, many-post
   dogfood and bounded resource evidence.
-- **WP-A18 — hardening:** recovery, hostile input, accessibility, platform and
+- **WP-A18 — hardening — complete:** recovery, hostile input, accessibility, platform and
   release evidence without overstating production readiness.
