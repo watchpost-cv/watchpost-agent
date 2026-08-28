@@ -41,6 +41,15 @@ type CollectorConfig struct {
 	Filesystems     []string `json:"filesystems"`
 }
 
+type DeliveryState struct {
+	Queue               []json.RawMessage `json:"queue"`
+	ConsecutiveFailures int               `json:"consecutive_failures"`
+	NextRetryAt         time.Time         `json:"next_retry_at,omitempty"`
+	LastSuccessAt       time.Time         `json:"last_success_at,omitempty"`
+	LastError           string            `json:"last_error,omitempty"`
+	DroppedCollections  uint64            `json:"dropped_collections"`
+}
+
 func DefaultCollectorConfig() CollectorConfig {
 	return CollectorConfig{IntervalSeconds: 60, CPU: true, Memory: true, Load: true, Uptime: true, Filesystems: []string{"/"}}
 }
@@ -72,6 +81,7 @@ type State struct {
 	PendingPairing PendingPairing  `json:"pending_pairing"`
 	NextSequence   int64           `json:"next_sequence"`
 	Collectors     CollectorConfig `json:"collectors"`
+	Delivery       DeliveryState   `json:"delivery"`
 	LocalAuth      LocalAuth       `json:"local_auth"`
 }
 

@@ -151,6 +151,7 @@ func (a *App) status(w http.ResponseWriter, _ *http.Request) {
 		"version": a.version, "installation_id": current.InstallationID,
 		"created_at": current.CreatedAt, "platform": runtime.GOOS + "/" + runtime.GOARCH,
 		"hostname": hostname, "state": "installed", "pairing": pairingState(current), "pairing_phrase": current.PendingPairing.Phrase, "pairing_expires_at": current.PendingPairing.ExpiresAt, "post_id": current.Connection.PostID,
+		"delivery": map[string]any{"queued": len(current.Delivery.Queue), "last_success_at": current.Delivery.LastSuccessAt, "last_error": current.Delivery.LastError, "next_retry_at": current.Delivery.NextRetryAt, "dropped_collections": current.Delivery.DroppedCollections},
 	})
 }
 

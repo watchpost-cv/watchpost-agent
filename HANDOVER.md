@@ -40,6 +40,11 @@ WP-A08 provides one validated collector profile to both control surfaces:
 15–3600-second intervals, CPU, memory, load, uptime and up to eight unique
 absolute filesystem paths. Changes are atomic and apply on the next interval.
 
+WP-A09 queues versioned batches atomically before transport, caps the queue at
+256 batches and 8 MiB, replays oldest-first, persists sequence/retry state and
+backs off to five minutes. Full queues skip collection explicitly and increment
+a visible loss counter rather than manufacturing continuity.
+
 This is a living handover for working effectively in a Nift project.
 
 Canonical version:

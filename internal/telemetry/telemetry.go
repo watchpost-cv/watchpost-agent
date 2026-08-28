@@ -40,6 +40,24 @@ func Send(ctx context.Context, store *state.Store) error {
 	if current.Connection.Credential == "" {
 		return errors.New("agent is not paired")
 	}
+	if !current.Delivery.NextRetryAt.IsZero() && time.Now().UTC().Before(current.Delivery.NextRetryAt) {
+		return nil
+	}
+	if err := enqueue(store, current); err != nil {
+		return err
+	}
+	return flush(ctx, store)
+}
+
+func enqueue(store *state.Store, current state.State) error {
+	if len(current.Delivery.Queue) >= 256 {
+		_ = store.Update(func(value *state.State) error {
+			value.Delivery.DroppedCollections++
+			value.Delivery.LastError = "delivery queue full; collection skipped"
+			return nil
+		})
+		return errors.New("delivery queue full")
+	}
 	now := time.Now().UTC()
 	values, err := snapshot(current.Collectors)
 	if err != nil {
@@ -56,22 +74,84 @@ func Send(ctx context.Context, store *state.Store) error {
 		sequence++
 	}
 	batch := Batch{Version: 1, PostID: current.Connection.PostID, CollectorID: current.InstallationID, BatchID: fmt.Sprintf("agent-%d", now.UnixNano()), SentAt: now, Samples: samples}
-	body, _ := json.Marshal(batch)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(current.Connection.WatchpostURL, "/")+"/api/collector/v1/observations", bytes.NewReader(body))
+	body, err := json.Marshal(batch)
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+current.Connection.Credential)
-	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
-	if err != nil {
-		return err
+	return store.Update(func(value *state.State) error {
+		size := len(body)
+		for _, queued := range value.Delivery.Queue {
+			size += len(queued)
+		}
+		if size > 8<<20 {
+			value.Delivery.DroppedCollections++
+			value.Delivery.LastError = "delivery queue byte limit reached; collection skipped"
+			return errors.New("delivery queue byte limit reached")
+		}
+		value.Delivery.Queue = append(value.Delivery.Queue, json.RawMessage(body))
+		value.NextSequence = sequence
+		return nil
+	})
+}
+
+func flush(ctx context.Context, store *state.Store) error {
+	for {
+		current := store.Snapshot()
+		if len(current.Delivery.Queue) == 0 {
+			return nil
+		}
+		var batch Batch
+		if err := json.Unmarshal(current.Delivery.Queue[0], &batch); err != nil {
+			return err
+		}
+		body := current.Delivery.Queue[0]
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(current.Connection.WatchpostURL, "/")+"/api/collector/v1/observations", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+current.Connection.Credential)
+		response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+		if err != nil {
+			markFailure(store, err)
+			return err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusAccepted {
+			err = fmt.Errorf("telemetry rejected (%d)", response.StatusCode)
+			markFailure(store, err)
+			return err
+		}
+		if err = store.Update(func(value *state.State) error {
+			if len(value.Delivery.Queue) > 0 {
+				value.Delivery.Queue = value.Delivery.Queue[1:]
+			}
+			value.Delivery.ConsecutiveFailures = 0
+			value.Delivery.NextRetryAt = time.Time{}
+			value.Delivery.LastError = ""
+			value.Delivery.LastSuccessAt = time.Now().UTC()
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("telemetry rejected (%d)", response.StatusCode)
-	}
-	return store.Update(func(value *state.State) error { value.NextSequence = sequence; return nil })
+}
+
+func markFailure(store *state.Store, cause error) {
+	_ = store.Update(func(value *state.State) error {
+		value.Delivery.ConsecutiveFailures++
+		shift := value.Delivery.ConsecutiveFailures - 1
+		if shift > 8 {
+			shift = 8
+		}
+		delay := time.Duration(1<<shift) * time.Second
+		if delay > 5*time.Minute {
+			delay = 5 * time.Minute
+		}
+		value.Delivery.NextRetryAt = time.Now().UTC().Add(delay)
+		value.Delivery.LastError = cause.Error()
+		return nil
+	})
 }
 
 type metric struct {

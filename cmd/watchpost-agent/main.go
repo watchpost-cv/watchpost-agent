@@ -134,7 +134,7 @@ func localCommand(action string, arguments []string) error {
 		return nil
 	case "info":
 		current := store.Snapshot()
-		result := map[string]any{"installation_id": current.InstallationID, "configured": current.LocalAuth.PasswordHash != "", "paired": current.Connection.Credential != "", "watchpost_url": current.Connection.WatchpostURL, "post_id": current.Connection.PostID}
+		result := map[string]any{"installation_id": current.InstallationID, "configured": current.LocalAuth.PasswordHash != "", "paired": current.Connection.Credential != "", "watchpost_url": current.Connection.WatchpostURL, "post_id": current.Connection.PostID, "queued_batches": len(current.Delivery.Queue), "delivery_failures": current.Delivery.ConsecutiveFailures, "last_delivery_error": current.Delivery.LastError, "dropped_collections": current.Delivery.DroppedCollections}
 		if *jsonOutput {
 			return json.NewEncoder(os.Stdout).Encode(result)
 		}

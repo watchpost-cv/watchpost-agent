@@ -17,7 +17,7 @@
   details beneath posts; never create duplicate inventory.
 - **WP-A08 — collector profiles — complete:** validated CPU, memory, filesystem, load and
   uptime configuration through equal website and CLI operations.
-- **WP-A09 — reliable delivery:** bounded durable queue, ordered replay,
+- **WP-A09 — reliable delivery — complete:** bounded durable queue, ordered replay,
   exponential retry and explicit loss across restart.
 - **WP-A10 — lifecycle and health:** healthy, stale, offline, partial, rejected,
   revoked and unpaired states plus revoke, unpair and reset operations.
