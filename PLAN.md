@@ -28,7 +28,7 @@
 - **WP-A13 — central checks — complete:** scheduled HTTP, TCP, TLS, DNS and ICMP methods.
 - **WP-A14 — device methods — complete:** durable read-only SNMP profiles and adapter
   boundary for non-host devices.
-- **WP-A15 — broader device evidence:** UPS, PDU, environmental and storage
+- **WP-A15 — broader device evidence — complete:** UPS, PDU, environmental and storage
   profiles with explicit quality and freshness.
 - **WP-A16 — lifecycle completion:** upgrade, credential rotation, move,
   archive, delete, reset and uninstall journeys.

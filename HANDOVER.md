@@ -65,6 +65,9 @@ agent remains the host-local monitoring method.
 WP-A14 registers SNMPv3 authPriv as Watchpost's first explicitly read-only
 device adapter. It is central rather than part of watchpost-agent; saved
 profiles belong beneath device posts and never persist polling passwords.
+WP-A15 adds central bounded starter profiles for network, UPS/PDU,
+environmental and storage evidence. Device readings explicitly carry quality,
+observation time and freshness; this work does not expand agent authority.
 
 This is a living handover for working effectively in a Nift project.
 
