@@ -17,6 +17,7 @@ import (
 	agentassets "github.com/watchpost-ops/watchpost-agent"
 	"github.com/watchpost-ops/watchpost-agent/internal/app"
 	"github.com/watchpost-ops/watchpost-agent/internal/auth"
+	"github.com/watchpost-ops/watchpost-agent/internal/pairing"
 	"github.com/watchpost-ops/watchpost-agent/internal/service"
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
 )
@@ -31,7 +32,7 @@ func main() {
 }
 
 func run(arguments []string) error {
-	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info") {
+	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status") {
 		return localCommand(arguments[0], arguments[1:])
 	}
 	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "status" || arguments[0] == "uninstall") {
@@ -76,6 +77,7 @@ func localCommand(action string, arguments []string) error {
 	dataDir := flags.String("data-dir", defaultDataDir(), "private agent data directory")
 	passwordFile := flags.String("password-file", "", "file containing the local UI password")
 	jsonOutput := flags.Bool("json", false, "print machine-readable status")
+	serverURL := flags.String("server", "", "Watchpost URL")
 	if err := flags.Parse(arguments); err != nil { return err }
 	if flags.NArg() != 0 { return fmt.Errorf("unexpected local command arguments") }
 	store, err := state.Open(filepath.Join(*dataDir, "agent.json"))
@@ -94,6 +96,11 @@ func localCommand(action string, arguments []string) error {
 		if *jsonOutput { return json.NewEncoder(os.Stdout).Encode(result) }
 		fmt.Printf("Installation: %s\nConfigured: %t\nPaired: %t\nWatchpost: %s\nPost: %s\n", current.InstallationID, result["configured"], result["paired"], current.Connection.WatchpostURL, current.Connection.PostID)
 		return nil
+	case "pair":
+		if *serverURL=="" { return fmt.Errorf("--server is required") }
+		result,err:=pairing.New(store,version).Request(context.Background(),*serverURL);if err!=nil{return err};fmt.Printf("Pairing requested.\nMatch this phrase in Watchpost: %s\nExpires: %s\n",result.Phrase,result.ExpiresAt.Format(time.RFC3339));return nil
+	case "pair-status":
+		result,err:=pairing.New(store,version).Poll(context.Background());if err!=nil{return err};if *jsonOutput{return json.NewEncoder(os.Stdout).Encode(result)};fmt.Printf("Pairing: %s\n",result.State);if result.PostID!=""{fmt.Printf("Post: %s\n",result.PostID)};return nil
 	}
 	return fmt.Errorf("unknown local action")
 }

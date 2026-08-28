@@ -55,3 +55,14 @@ chmod 600 /secure/path/agent-password
 Remove the temporary password file according to your system's secret-handling
 policy. The UI binds to loopback by default and enforces authenticated sessions,
 same-origin state changes, CSRF tokens, request bounds and login throttling.
+
+Pair from the local website, or use the equivalent flow on a headless server:
+
+```sh
+./watchpost-agent pair --server https://watchpost.example.net
+./watchpost-agent pair-status
+```
+
+The first command prints a short phrase. Approve that exact phrase in Watchpost,
+then run `pair-status` to retrieve and store the one-time credential. Both
+control surfaces use the same private state file.

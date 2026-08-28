@@ -19,6 +19,14 @@ type Connection struct {
 	Credential   string `json:"credential,omitempty"`
 }
 
+type PendingPairing struct {
+	WatchpostURL string `json:"watchpost_url,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	RequestSecret string `json:"request_secret,omitempty"`
+	Phrase string `json:"phrase,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
 type LocalAuth struct {
 	Salt         string `json:"salt,omitempty"`
 	PasswordHash string `json:"password_hash,omitempty"`
@@ -29,6 +37,7 @@ type State struct {
 	InstallationID string     `json:"installation_id"`
 	CreatedAt      time.Time  `json:"created_at"`
 	Connection     Connection `json:"connection"`
+	PendingPairing PendingPairing `json:"pending_pairing"`
 	LocalAuth      LocalAuth  `json:"local_auth"`
 }
 

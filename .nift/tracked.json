@@ -16,6 +16,12 @@
       "title": "script",
       "content-ext": ".js",
       "output-ext": ".js"
+    },
+    {
+      "name": "assets/css/pairing",
+      "title": "pairing",
+      "content-ext": ".css",
+      "output-ext": ".css"
     }
   ]
 }

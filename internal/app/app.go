@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/watchpost-ops/watchpost-agent/internal/auth"
+	"github.com/watchpost-ops/watchpost-agent/internal/pairing"
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
 )
 
@@ -17,10 +18,11 @@ type App struct {
 	auth    *auth.Manager
 	version string
 	assets  fs.FS
+	pairing *pairing.Client
 }
 
 func New(store *state.Store, version string, assets fs.FS) *App {
-	return &App{state: store, auth: auth.New(store), version: version, assets: assets}
+	return &App{state: store, auth: auth.New(store), version: version, assets: assets, pairing: pairing.New(store,version)}
 }
 
 func (a *App) Handler() http.Handler {
@@ -32,6 +34,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/login", a.login)
 	mux.HandleFunc("POST /api/v1/logout", a.require(a.logout))
 	mux.HandleFunc("GET /api/v1/status", a.require(a.status))
+	mux.HandleFunc("POST /api/v1/pairing/request", a.require(a.requestPairing))
+	mux.HandleFunc("POST /api/v1/pairing/poll", a.require(a.pollPairing))
 	mux.Handle("/", http.FileServer(http.FS(a.assets)))
 	return headers(mux)
 }
@@ -106,9 +110,13 @@ func (a *App) status(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"version": a.version, "installation_id": current.InstallationID,
 		"created_at": current.CreatedAt, "platform": runtime.GOOS + "/" + runtime.GOARCH,
-		"hostname": hostname, "state": "installed", "pairing": "unpaired",
+		"hostname": hostname, "state": "installed", "pairing": pairingState(current), "pairing_phrase": current.PendingPairing.Phrase, "pairing_expires_at": current.PendingPairing.ExpiresAt, "post_id": current.Connection.PostID,
 	})
 }
+
+func pairingState(value state.State) string { if value.Connection.Credential!="" { return "paired" }; if value.PendingPairing.RequestID!="" { return "pending" }; return "unpaired" }
+func(a *App)requestPairing(w http.ResponseWriter,r *http.Request){var input struct{WatchpostURL string `json:"watchpost_url"`};if !decode(w,r,&input){return};result,err:=a.pairing.Request(r.Context(),input.WatchpostURL);if err!=nil{writeJSON(w,400,map[string]string{"error":err.Error()});return};writeJSON(w,201,result)}
+func(a *App)pollPairing(w http.ResponseWriter,r *http.Request){result,err:=a.pairing.Poll(r.Context());if err!=nil{writeJSON(w,409,map[string]string{"error":err.Error()});return};writeJSON(w,200,result)}
 
 var runtimeHostname = os.Hostname
 

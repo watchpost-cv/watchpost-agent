@@ -1,0 +1,11 @@
+.pair-panel {
+  margin: 0 0 14px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.pair-panel form { max-width: 620px; }
+.pair-panel label { display: grid; gap: 7px; margin: 18px 0; color: var(--muted); font-weight: 650; }
+.pair-panel input { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; }
+.phrase { color: var(--accent); font: 750 clamp(24px, 5vw, 38px) ui-monospace, monospace; letter-spacing: .02em; }

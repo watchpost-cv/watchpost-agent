@@ -1,7 +1,7 @@
 # HANDOVER.md
 v0.0.5
 
-Project status: WP-A01–WP-A04 are complete. Watchpost Agent is a separate
+Project status: WP-A01–WP-A05 are complete. Watchpost Agent is a separate
 program with its own embedded, loopback-first website and an equivalent CLI for
 servers and automation. It is installed before pairing. The frontend and CLI
 must call the same application service and persist the same state. Read
@@ -22,6 +22,11 @@ WP-A04 protects the loopback UI with first-run setup, a minimum seven-character
 password, iterated salted hashes, memory-only sessions, SameSite/HttpOnly
 cookies, Origin and CSRF checks, bounded JSON and login throttling. Headless
 setup reads a password file; `info --json` exposes non-secret local status.
+
+WP-A05 adds agent-originated pairing through either the website or CLI. Requests
+expire after ten minutes and show a matching phrase in both programs. Watchpost
+approval precedes one-time credential delivery; the request secret never leaves
+the agent state and the browser never receives it.
 
 This is a living handover for working effectively in a Nift project.
 
