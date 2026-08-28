@@ -13,7 +13,7 @@
 - **WP-A06 — complete journey — complete:** web and CLI pairing, first telemetry, restart
   recovery and explicit failure states.
 
-- **WP-A07 — post-owned connections:** expose installed agents as monitoring
+- **WP-A07 — post-owned connections — complete:** expose installed agents as monitoring
   details beneath posts; never create duplicate inventory.
 - **WP-A08 — collector profiles — complete:** validated CPU, memory, filesystem, load and
   uptime configuration through equal website and CLI operations.
@@ -23,7 +23,7 @@
   revoked and unpaired states plus revoke, unpair and reset operations.
 - **WP-A11 — dense survey — complete:** compact visual health bars and trends across many
   posts, with accessible numeric values and responsive layouts.
-- **WP-A12 — policy-aware status:** connect signals to starter rules and show
+- **WP-A12 — policy-aware status — complete:** connect signals to starter rules and show
   safe, warning, critical, unknown and maintenance state without hiding cause.
 - **WP-A13 — central checks:** scheduled HTTP, TCP, TLS, DNS and ICMP methods.
 - **WP-A14 — device methods:** durable read-only SNMP profiles and adapter

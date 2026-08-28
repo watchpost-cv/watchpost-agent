@@ -40,11 +40,12 @@ func Send(ctx context.Context, store *state.Store) error {
 	if current.Connection.Credential == "" {
 		return errors.New("agent is not paired")
 	}
-	if !current.Delivery.NextRetryAt.IsZero() && time.Now().UTC().Before(current.Delivery.NextRetryAt) {
-		return nil
-	}
 	if err := enqueue(store, current); err != nil {
 		return err
+	}
+	current = store.Snapshot()
+	if !current.Delivery.NextRetryAt.IsZero() && time.Now().UTC().Before(current.Delivery.NextRetryAt) {
+		return nil
 	}
 	return flush(ctx, store)
 }

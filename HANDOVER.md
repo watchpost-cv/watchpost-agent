@@ -54,6 +54,11 @@ WP-A11 is implemented in Watchpost's resource survey: compact two-column cards,
 dominant green/amber/red/grey health bars, trends, numbers, connection state,
 filtering and attention/name/resource ordering collapse responsively on mobile.
 
+WP-A12 makes survey status policy-aware in Watchpost. Enabled thresholds,
+active alert severity, maintenance, sample quality/freshness and connection
+health produce a visible state and reason. Starter rules are inspectable and
+pauseable; missing policy is unknown rather than healthy.
+
 This is a living handover for working effectively in a Nift project.
 
 Canonical version:

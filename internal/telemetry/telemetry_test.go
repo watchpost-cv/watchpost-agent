@@ -31,12 +31,19 @@ func TestFailedDeliverySurvivesRestart(t *testing.T) {
 	if len(before.Delivery.Queue) != 1 || before.NextSequence <= 1 || before.Delivery.LastError == "" {
 		t.Fatalf("queue not retained: %#v", before.Delivery)
 	}
+	if err = Send(context.Background(), store); err != nil {
+		t.Fatalf("collect during backoff: %v", err)
+	}
+	before = store.Snapshot()
+	if len(before.Delivery.Queue) != 2 {
+		t.Fatalf("backoff stopped durable collection: queued=%d", len(before.Delivery.Queue))
+	}
 	reopened, err := state.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	after := reopened.Snapshot()
-	if len(after.Delivery.Queue) != 1 || after.NextSequence != before.NextSequence {
+	if len(after.Delivery.Queue) != 2 || after.NextSequence != before.NextSequence {
 		t.Fatal("queue or sequence did not survive restart")
 	}
 }
