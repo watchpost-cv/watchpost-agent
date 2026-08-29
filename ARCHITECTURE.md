@@ -29,9 +29,23 @@ user-managed inventory object.
 
 ## Default exposure
 
-The embedded UI listens on loopback only. Non-loopback access must be explicit,
-authenticated and documented. Pairing and delivery use HTTPS except when both
+The embedded UI listens on loopback only. Non-loopback access is explicitly
+experimental: binding a non-loopback interface requires `WATCHPOST_AGENT_EXPOSE=1`
+and prints a prominent warning. Remote use must terminate HTTPS at a reviewed
+reverse proxy, enable secure cookies and explicit proxy trust, restrict client
+CIDRs, and rely on the local role model and audit log. Forwarded headers are
+never trusted by default. Pairing and delivery use HTTPS except when both
 programs communicate over loopback for local development.
+
+## Local roles
+
+The first setup creates a local `admin`. `admin` manages local accounts
+(technician/viewer), pairing authority, credentials, remote exposure and
+destructive lifecycle operations; `technician` inspects health, configures
+collectors and performs normal pairing and recovery; `viewer` is read-only.
+Local accounts are independent of Watchpost sessions: the agent must remain
+manageable when Watchpost is unavailable. State-changing local operations are
+recorded in a bounded local audit log.
 
 ## Lifecycle
 

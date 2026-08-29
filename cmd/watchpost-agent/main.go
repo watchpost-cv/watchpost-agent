@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -57,11 +58,15 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	options, err := appOptions(*listen)
+	if err != nil {
+		return err
+	}
 	public, err := fs.Sub(agentassets.Public, "public")
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: *listen, Handler: app.New(store, version, public).Handler(), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Addr: *listen, Handler: app.New(store, version, public, options).Handler(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go deliveryLoop(ctx, store)
@@ -255,4 +260,58 @@ func defaultDataDir() string {
 		return ".watchpost-agent"
 	}
 	return filepath.Join(home, ".local", "share", "watchpost-agent")
+}
+
+// appOptions reads remote-management security options. Binding to a
+// non-loopback interface requires an explicit WATCHPOST_AGENT_EXPOSE opt-in
+// and prints a prominent warning, because the local interface is not a
+// hardened internet service.
+func appOptions(listen string) (app.Options, error) {
+	options := app.Options{
+		SecureCookies: envBool("WATCHPOST_AGENT_SECURE_COOKIES"),
+		TrustedProxy:  envBool("WATCHPOST_AGENT_TRUSTED_PROXY"),
+	}
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return options, fmt.Errorf("invalid listen address %q", listen)
+	}
+	loopback := host == "localhost" || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
+	if !loopback && !envBool("WATCHPOST_AGENT_EXPOSE") {
+		return options, fmt.Errorf("binding to %s exposes the local agent interface beyond loopback; set WATCHPOST_AGENT_EXPOSE=1 only after reviewing HTTPS/reverse-proxy deployment and local roles", listen)
+	}
+	if !loopback {
+		fmt.Fprintf(os.Stderr, "WARNING: Watchpost Agent interface is bound to %s (non-loopback).\nThis is experimental. Terminate HTTPS at a reverse proxy, enable WATCHPOST_AGENT_SECURE_COOKIES, restrict client CIDRs, and review the local audit log.\n", listen)
+	}
+	allow, err := parseCIDRs(os.Getenv("WATCHPOST_AGENT_ALLOW_CIDRS"))
+	if err != nil {
+		return options, err
+	}
+	deny, err := parseCIDRs(os.Getenv("WATCHPOST_AGENT_DENY_CIDRS"))
+	if err != nil {
+		return options, err
+	}
+	options.AllowCIDRs = allow
+	options.DenyCIDRs = deny
+	return options, nil
+}
+
+func parseCIDRs(value string) ([]*net.IPNet, error) {
+	nets := []*net.IPNet{}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid agent CIDR %q", part)
+		}
+		nets = append(nets, network)
+	}
+	return nets, nil
+}
+
+func envBool(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes"
 }

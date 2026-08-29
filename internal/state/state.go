@@ -30,8 +30,41 @@ type PendingPairing struct {
 }
 
 type LocalAuth struct {
-	Salt         string `json:"salt,omitempty"`
-	PasswordHash string `json:"password_hash,omitempty"`
+	Salt         string        `json:"salt,omitempty"`
+	PasswordHash string        `json:"password_hash,omitempty"`
+	Accounts     []Account     `json:"accounts,omitempty"`
+	Audit        []AuditEntry  `json:"audit,omitempty"`
+}
+
+// Account is a local administrator/technician/viewer account. Only the first
+// administrator is created by setup; the administrator manages the rest.
+type Account struct {
+	ID           string `json:"id"`
+	Email        string `json:"email"`
+	Salt         string `json:"salt"`
+	PasswordHash string `json:"password_hash"`
+	Role         string `json:"role"`
+	CreatedAt    string `json:"created_at"`
+}
+
+// AuditEntry records an attributed local state change. The list is bounded to
+// the most recent entries so it can never exhaust disk.
+type AuditEntry struct {
+	At     string `json:"at"`
+	Actor  string `json:"actor"`
+	Action string `json:"action"`
+	Detail string `json:"detail"`
+}
+
+const MaxAuditEntries = 200
+
+// AppendAudit records an attributed local operation, keeping the newest
+// MaxAuditEntries.
+func (a *LocalAuth) AppendAudit(actor, action, detail string) {
+	a.Audit = append(a.Audit, AuditEntry{At: time.Now().UTC().Format(time.RFC3339Nano), Actor: actor, Action: action, Detail: detail})
+	if len(a.Audit) > MaxAuditEntries {
+		a.Audit = a.Audit[len(a.Audit)-MaxAuditEntries:]
+	}
 }
 
 type CollectorConfig struct {
@@ -102,6 +135,13 @@ func Open(path string) (*Store, error) {
 	if err == nil {
 		if json.Unmarshal(data, &s.data) != nil || s.data.Version != Version || s.data.InstallationID == "" {
 			return nil, errors.New("invalid agent state")
+		}
+		// Migrate the legacy single-admin form into the account list.
+		if s.data.LocalAuth.PasswordHash != "" && len(s.data.LocalAuth.Accounts) == 0 {
+			s.data.LocalAuth.Accounts = []Account{{ID: "admin", Email: "admin@local", Salt: s.data.LocalAuth.Salt, PasswordHash: s.data.LocalAuth.PasswordHash, Role: "admin", CreatedAt: s.data.CreatedAt.Format(time.RFC3339Nano)}}
+			if err = s.saveLocked(); err != nil {
+				return nil, err
+			}
 		}
 		if s.data.Collectors.IntervalSeconds == 0 {
 			s.data.Collectors = DefaultCollectorConfig()

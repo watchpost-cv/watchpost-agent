@@ -71,6 +71,27 @@ Remove the temporary password file according to your system's secret-handling
 policy. The UI binds to loopback by default and enforces authenticated sessions,
 same-origin state changes, CSRF tokens, request bounds and login throttling.
 
+### Local roles
+
+The first setup creates the local `admin` account. Administrators can create
+`technician` and `viewer` local accounts from the website's Administrator
+panel: `admin` manages accounts, pairing authority, credentials, remote
+exposure and destructive lifecycle operations; `technician` can inspect
+health, configure collectors and perform normal pairing and recovery tasks;
+`viewer` is read-only. Every state-changing local operation is recorded in a
+bounded local audit log visible to administrators.
+
+### Remote exposure is experimental
+
+The interface defaults to loopback and is not a hardened internet service.
+Binding a non-loopback address requires an explicit
+`WATCHPOST_AGENT_EXPOSE=1` opt-in and prints a prominent warning. For any
+remote use terminate HTTPS at a reviewed reverse proxy, set
+`WATCHPOST_AGENT_SECURE_COOKIES=1`, enable `WATCHPOST_AGENT_TRUSTED_PROXY=1`
+so forwarded scheme/host are honoured for origin checks, restrict clients with
+`WATCHPOST_AGENT_ALLOW_CIDRS` / `WATCHPOST_AGENT_DENY_CIDRS`, and review the
+local audit log. Forwarded headers are never trusted by default.
+
 Pair from the local website, or use the equivalent flow on a headless server:
 
 ```sh
