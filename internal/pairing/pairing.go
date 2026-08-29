@@ -154,7 +154,13 @@ func (c *Client) Rotate(ctx context.Context) error {
 	if err = json.NewDecoder(response.Body).Decode(&result); err != nil || result.Credential == "" {
 		return errors.New("invalid rotation response")
 	}
-	return c.state.Update(func(value *state.State) error { value.Connection.Credential = result.Credential; return nil })
+	// Overlap-and-confirm: keep the previous credential until Watchpost
+	// confirms the replacement by accepting telemetry authenticated with it.
+	return c.state.Update(func(value *state.State) error {
+		value.Connection.PreviousCredential = value.Connection.Credential
+		value.Connection.Credential = result.Credential
+		return nil
+	})
 }
 
 func safeURL(value string) error {

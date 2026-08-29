@@ -14,9 +14,10 @@ import (
 const Version = 1
 
 type Connection struct {
-	WatchpostURL string `json:"watchpost_url,omitempty"`
-	PostID       string `json:"post_id,omitempty"`
-	Credential   string `json:"credential,omitempty"`
+	WatchpostURL       string `json:"watchpost_url,omitempty"`
+	PostID             string `json:"post_id,omitempty"`
+	Credential         string `json:"credential,omitempty"`
+	PreviousCredential string `json:"previous_credential,omitempty"`
 }
 
 type PendingPairing struct {

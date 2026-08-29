@@ -105,39 +105,69 @@ func flush(ctx context.Context, store *state.Store) error {
 			return err
 		}
 		body := current.Delivery.Queue[0]
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(current.Connection.WatchpostURL, "/")+"/api/collector/v1/observations", bytes.NewReader(body))
-		if err != nil {
-			return err
+		client := &http.Client{Timeout: 10 * time.Second}
+		credentials := []string{current.Connection.Credential}
+		if current.Connection.PreviousCredential != "" && current.Connection.PreviousCredential != current.Connection.Credential {
+			credentials = append(credentials, current.Connection.PreviousCredential)
 		}
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Authorization", "Bearer "+current.Connection.Credential)
-		response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
-		if err != nil {
-			markFailure(store, err)
-			return err
-		}
-		defer response.Body.Close()
-		if response.StatusCode == http.StatusInsufficientStorage {
-			err = errors.New("Watchpost storage is full; retrying within bounded queue")
-			markFailure(store, err)
-			return err
-		}
-		if response.StatusCode != http.StatusAccepted {
-			err = fmt.Errorf("telemetry rejected (%d)", response.StatusCode)
-			markFailure(store, err)
-			return err
-		}
-		if err = store.Update(func(value *state.State) error {
-			if len(value.Delivery.Queue) > 0 {
-				value.Delivery.Queue = value.Delivery.Queue[1:]
+		var lastErr error
+		delivered := false
+		for _, credential := range credentials {
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(current.Connection.WatchpostURL, "/")+"/api/collector/v1/observations", bytes.NewReader(body))
+			if err != nil {
+				return err
 			}
-			value.Delivery.ConsecutiveFailures = 0
-			value.Delivery.NextRetryAt = time.Time{}
-			value.Delivery.LastError = ""
-			value.Delivery.LastSuccessAt = time.Now().UTC()
-			return nil
-		}); err != nil {
-			return err
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+credential)
+			response, err := client.Do(request)
+			if err != nil {
+				markFailure(store, err)
+				return err
+			}
+			if response.StatusCode == http.StatusInsufficientStorage {
+				response.Body.Close()
+				err = errors.New("Watchpost storage is full; retrying within bounded queue")
+				markFailure(store, err)
+				return err
+			}
+			if response.StatusCode == http.StatusAccepted {
+				response.Body.Close()
+				usedPrevious := credential != current.Connection.Credential
+				if err = store.Update(func(value *state.State) error {
+					if len(value.Delivery.Queue) > 0 {
+						value.Delivery.Queue = value.Delivery.Queue[1:]
+					}
+					value.Delivery.ConsecutiveFailures = 0
+					value.Delivery.NextRetryAt = time.Time{}
+					value.Delivery.LastError = ""
+					value.Delivery.LastSuccessAt = time.Now().UTC()
+					if usedPrevious {
+						// Watchpost accepted the previous credential, so the
+						// replacement was never confirmed: revert to it.
+						value.Connection.Credential = value.Connection.PreviousCredential
+						value.Connection.PreviousCredential = ""
+					} else if value.Connection.PreviousCredential != "" {
+						// Confirmed with the replacement: drop the overlap.
+						value.Connection.PreviousCredential = ""
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				delivered = true
+				break
+			}
+			status := response.StatusCode
+			response.Body.Close()
+			lastErr = fmt.Errorf("telemetry rejected (%d)", status)
+			if status != http.StatusUnauthorized && status != http.StatusForbidden && status != http.StatusConflict {
+				markFailure(store, lastErr)
+				return lastErr
+			}
+		}
+		if !delivered {
+			markFailure(store, lastErr)
+			return lastErr
 		}
 	}
 }
