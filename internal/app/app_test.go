@@ -22,7 +22,7 @@ func TestUnpairedStatusAndSecurityHeaders(t *testing.T) {
 	}
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
 	handler := New(store, "test", fs.FS(assets), Options{}).Handler()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"password":"1234567"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
 	request.Header.Set("Origin", "http://example.com")
 	request.Host = "example.com"
 	response := httptest.NewRecorder()
@@ -30,7 +30,7 @@ func TestUnpairedStatusAndSecurityHeaders(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("setup=%d %s", response.Code, response.Body.String())
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"password":"1234567"}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
 	request.Header.Set("Origin", "http://example.com")
 	request.Host = "example.com"
 	response = httptest.NewRecorder()
@@ -50,9 +50,9 @@ func TestUnpairedStatusAndSecurityHeaders(t *testing.T) {
 	}
 }
 
-func loginForRole(t *testing.T, handler http.Handler, password string) (*http.Cookie, string) {
+func loginForRole(t *testing.T, handler http.Handler, email, password string) (*http.Cookie, string) {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"password":"`+password+`"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"email":"`+email+`","password":"`+password+`"}`))
 	request.Header.Set("Origin", "http://example.com")
 	request.Host = "example.com"
 	response := httptest.NewRecorder()
@@ -74,7 +74,7 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	}
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
 	handler := New(store, "test", fs.FS(assets), Options{}).Handler()
-	setup := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"password":"admin-pass-1"}`))
+	setup := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"admin-pass-1"}`))
 	setup.Header.Set("Origin", "http://example.com")
 	setup.Host = "example.com"
 	setupRecorder := httptest.NewRecorder()
@@ -82,7 +82,7 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	if setupRecorder.Code != http.StatusNoContent {
 		t.Fatalf("setup=%d", setupRecorder.Code)
 	}
-	adminCookie, adminCSRF := loginForRole(t, handler, "admin-pass-1")
+	adminCookie, adminCSRF := loginForRole(t, handler, "admin@local", "admin-pass-1")
 	// Create roles through the auth manager directly, then log in through the API.
 	manager := auth.New(store)
 	if _, err := manager.CreateAccount("tech@local", "tech-pass-1", "technician"); err != nil {
@@ -91,8 +91,8 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	if _, err := manager.CreateAccount("view@local", "view-pass-1", "viewer"); err != nil {
 		t.Fatal(err)
 	}
-	techCookie, techCSRF := loginForRole(t, handler, "tech-pass-1")
-	viewCookie, viewCSRF := loginForRole(t, handler, "view-pass-1")
+	techCookie, techCSRF := loginForRole(t, handler, "tech@local", "tech-pass-1")
+	viewCookie, viewCSRF := loginForRole(t, handler, "view@local", "view-pass-1")
 
 	// Viewer cannot configure collectors, rotate, unpair or manage accounts.
 	put := func(cookie *http.Cookie, csrf, path, body string) int {
@@ -161,11 +161,11 @@ func TestTrustedProxyOriginHandling(t *testing.T) {
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
 	setupApp := func(trusted bool) http.Handler {
 		manager := auth.New(store)
-		_ = manager.Setup("admin-pass-1")
+		_ = manager.Setup("admin@local", "admin-pass-1")
 		return New(store, "test", fs.FS(assets), Options{TrustedProxy: trusted}).Handler()
 	}
 	login := func(handler http.Handler, forwardedProto, forwardedHost string) int {
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"password":"admin-pass-1"}`))
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"email":"admin@local","password":"admin-pass-1"}`))
 		request.Header.Set("Origin", "https://proxy.example")
 		request.Host = "127.0.0.1:8090"
 		request.Header.Set("X-Forwarded-Proto", forwardedProto)

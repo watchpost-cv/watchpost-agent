@@ -85,12 +85,13 @@ func (a *App) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
+		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	if err := a.auth.Setup(input.Password); err != nil {
+	if err := a.auth.Setup(input.Email, input.Password); err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
@@ -103,12 +104,13 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
+		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	session, err := a.auth.Login(input.Password)
+	session, err := a.auth.Login(input.Email, input.Password)
 	if err != nil {
 		writeJSON(w, 401, map[string]string{"error": "invalid credentials"})
 		return

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,10 +53,16 @@ func (m *Manager) SetupRequired() bool {
 	return len(m.state.Snapshot().LocalAuth.Accounts) == 0
 }
 
-func (m *Manager) Setup(password string) error {
-	if len(password) < MinimumPasswordLength {
-		return errors.New("password must contain at least 7 characters")
+// NormalizeEmail canonicalises an account identity. Login and account creation
+// compare normalized identities, so case differences cannot create duplicate
+// accounts or resolve to the wrong one.
+func NormalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
+
+func (m *Manager) Setup(email, password string) error {
+	if !strings.Contains(email, "@") || len(password) < MinimumPasswordLength {
+		return errors.New("valid email and password of at least 7 characters required")
 	}
+	email = NormalizeEmail(email)
 	return m.state.Update(func(current *state.State) error {
 		if len(current.LocalAuth.Accounts) != 0 {
 			return errors.New("local setup already completed")
@@ -70,13 +77,14 @@ func (m *Manager) Setup(password string) error {
 		}
 		current.LocalAuth.Salt = salt
 		current.LocalAuth.PasswordHash = passwordHash(password, salt)
-		current.LocalAuth.Accounts = []state.Account{{ID: id, Email: "admin@local", Salt: salt, PasswordHash: current.LocalAuth.PasswordHash, Role: "admin", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}}
-		current.LocalAuth.AppendAudit("admin@local", "setup", "first administrator created")
+		current.LocalAuth.Accounts = []state.Account{{ID: id, Email: email, Salt: salt, PasswordHash: current.LocalAuth.PasswordHash, Role: "admin", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}}
+		current.LocalAuth.AppendAudit(email, "setup", "first administrator created")
 		return nil
 	})
 }
 
-func (m *Manager) Login(password string) (Session, error) {
+func (m *Manager) Login(email, password string) (Session, error) {
+	email = NormalizeEmail(email)
 	m.mu.Lock()
 	cutoff := time.Now().Add(-5 * time.Minute)
 	recent := m.failures[:0]
@@ -93,23 +101,27 @@ func (m *Manager) Login(password string) (Session, error) {
 	}
 	configured := m.state.Snapshot().LocalAuth
 	for _, account := range configured.Accounts {
-		if subtle.ConstantTimeCompare([]byte(passwordHash(password, account.Salt)), []byte(account.PasswordHash)) == 1 {
-			sessionToken, err := token(32)
-			if err != nil {
-				return Session{}, err
-			}
-			csrf, err := token(24)
-			if err != nil {
-				return Session{}, err
-			}
-			user := Account{ID: account.ID, Email: account.Email, Role: account.Role}
-			m.mu.Lock()
-			m.failures = nil
-			m.sessions[sessionToken] = sessionRecord{CSRF: csrf, Expires: time.Now().Add(24 * time.Hour), User: user}
-			m.mu.Unlock()
-			m.recordAudit(account.Email, "login", "login")
-			return Session{Token: sessionToken, CSRF: csrf, User: user}, nil
+		if account.Email != email {
+			continue
 		}
+		if subtle.ConstantTimeCompare([]byte(passwordHash(password, account.Salt)), []byte(account.PasswordHash)) != 1 {
+			break
+		}
+		sessionToken, err := token(32)
+		if err != nil {
+			return Session{}, err
+		}
+		csrf, err := token(24)
+		if err != nil {
+			return Session{}, err
+		}
+		user := Account{ID: account.ID, Email: account.Email, Role: account.Role}
+		m.mu.Lock()
+		m.failures = nil
+		m.sessions[sessionToken] = sessionRecord{CSRF: csrf, Expires: time.Now().Add(24 * time.Hour), User: user}
+		m.mu.Unlock()
+		m.recordAudit(account.Email, "login", "login")
+		return Session{Token: sessionToken, CSRF: csrf, User: user}, nil
 	}
 	m.mu.Lock()
 	m.failures = append(m.failures, time.Now())
@@ -197,8 +209,10 @@ func (m *Manager) ChangePassword(accountID, currentPassword, newPassword, keepTo
 }
 
 // CreateAccount adds a technician or viewer account (administrator only).
+// Identities are normalized and compared case-insensitively.
 func (m *Manager) CreateAccount(email, password, role string) (Account, error) {
-	if email == "" || len(password) < MinimumPasswordLength || (role != "admin" && role != "technician" && role != "viewer") {
+	email = NormalizeEmail(email)
+	if email == "" || !strings.Contains(email, "@") || len(password) < MinimumPasswordLength || (role != "admin" && role != "technician" && role != "viewer") {
 		return Account{}, errors.New("valid email, password of at least 7 characters, and role required")
 	}
 	var created Account
