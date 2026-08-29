@@ -92,12 +92,22 @@ creation and is never returned by any API. `WATCHPOST_AGENT_SETUP_TOKEN_TTL`
 
 Every persistent local change — collector configuration, pairing requests and
 approvals, credential rotation, unpair and pending revocation, account
-creation, session revocation and password changes — writes its attributed audit
-row in the **same atomic state save** as the change itself. A failed save rolls
-the whole update back, leaving both the in-memory state and the on-disk file
-unchanged, and the endpoint reports failure rather than success. Exactly one
-audit entry is emitted per logical operation, attributed to the authenticated
-account (the CLI attributes its operations to `cli`), never a generic actor.
+creation and password changes — writes its attributed audit row in the **same
+atomic state save** as the change itself. A failed save rolls the whole update
+back, leaving both the in-memory state and the on-disk file unchanged, and the
+endpoint reports failure rather than success.
+
+Sessions are deliberately held in memory, not in the persistent state, so their
+security events cannot share a state save. Login, logout and session
+revocation therefore give the audit a truthful durable ordering instead: the
+attributed audit entry is persisted **before** the non-failing in-memory
+session mutation. If that write fails, no session is created (login), the
+session remains valid (logout), or every targeted session remains valid
+(revocation), and the endpoint reports failure rather than success.
+
+Exactly one audit entry is emitted per logical operation, attributed to the
+authenticated account (the CLI attributes its operations to `cli`), never a
+generic actor.
 
 ### Local roles
 

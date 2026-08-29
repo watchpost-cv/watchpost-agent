@@ -53,13 +53,19 @@ is read-only. Login is by email and password, and identities are normalized
 (lowercase) so case differences cannot collide. Local accounts are independent
 of Watchpost sessions: the agent must remain manageable when Watchpost is
 unavailable. State-changing local operations are recorded in a bounded local
-audit log. Each persistent local mutation appends its audit row inside the
-same atomic state save, so a failed save leaves both the in-memory state and
-the on-disk file unchanged and the operation reports failure; exactly one
-entry is emitted per operation with the real acting identity (the CLI uses
-`cli`), never a generic actor. Local password hashes use the same versioned
-PBKDF2-HMAC-SHA256 derivation as the central server; hashes from older agent
-builds must be re-established with `reset`.
+audit log. Persistent local mutations append their audit row inside the same
+atomic state save, so a failed save leaves both the in-memory state and the
+on-disk file unchanged and the operation reports failure; exactly one entry is
+emitted per operation with the real acting identity (the CLI uses `cli`), never
+a generic actor. Sessions are ephemeral in-memory state, so login, logout and
+session revocation use a truthful durable ordering instead: the attributed
+audit entry is persisted before the in-memory session mutation, and a failed
+write leaves the session set unchanged and reports failure. The session lock is
+held while the audit state save runs (session → state); no code path takes the
+state lock and then the session lock, so the single-direction ordering cannot
+deadlock. Local password hashes use the same versioned PBKDF2-HMAC-SHA256
+derivation as the central server; hashes from older agent builds must be
+re-established with `reset`.
 
 ## Lifecycle
 
