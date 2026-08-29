@@ -88,6 +88,17 @@ token is stored; it is consumed atomically with the first administrator's
 creation and is never returned by any API. `WATCHPOST_AGENT_SETUP_TOKEN_TTL`
 (default 1 hour) bounds its lifetime.
 
+### Atomic local state and audit
+
+Every persistent local change — collector configuration, pairing requests and
+approvals, credential rotation, unpair and pending revocation, account
+creation, session revocation and password changes — writes its attributed audit
+row in the **same atomic state save** as the change itself. A failed save rolls
+the whole update back, leaving both the in-memory state and the on-disk file
+unchanged, and the endpoint reports failure rather than success. Exactly one
+audit entry is emitted per logical operation, attributed to the authenticated
+account (the CLI attributes its operations to `cli`), never a generic actor.
+
 ### Local roles
 
 The first setup creates the local `admin` account. Administrators can create
