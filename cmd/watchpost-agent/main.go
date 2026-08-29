@@ -62,6 +62,9 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	if err := provisionSetupToken(store, options); err != nil {
+		return err
+	}
 	public, err := fs.Sub(agentassets.Public, "public")
 	if err != nil {
 		return err
@@ -139,7 +142,7 @@ func localCommand(action string, arguments []string) error {
 		if err != nil {
 			return err
 		}
-		if err = auth.New(store).Setup(*email, strings.TrimRight(string(password), "\r\n")); err != nil {
+if err = auth.New(store).Setup(*email, strings.TrimRight(string(password), "\r\n"), ""); err != nil {
 			return err
 		}
 		fmt.Println("Local agent administrator configured.")
@@ -293,7 +296,51 @@ func appOptions(listen string) (app.Options, error) {
 	}
 	options.AllowCIDRs = allow
 	options.DenyCIDRs = deny
+	// First-admin setup requires a bootstrap token whenever agent management is
+	// remotely exposed or an operator-supplied token is configured.
+	operatorToken := os.Getenv("WATCHPOST_AGENT_SETUP_TOKEN") != "" || os.Getenv("WATCHPOST_AGENT_SETUP_TOKEN_FILE") != ""
+	options.SetupTokenRequired = operatorToken || !loopback
 	return options, nil
+}
+
+// provisionSetupToken stores or generates the first-admin bootstrap token. The
+// raw value is printed once (or comes from a protected operator file); only a
+// hash is persisted. The token is never returned by any API.
+func provisionSetupToken(store *state.Store, options app.Options) error {
+	if !options.SetupTokenRequired {
+		return nil
+	}
+	manager := auth.New(store)
+	if !manager.SetupRequired() {
+		return nil
+	}
+	raw := os.Getenv("WATCHPOST_AGENT_SETUP_TOKEN")
+	if raw == "" {
+		if file := os.Getenv("WATCHPOST_AGENT_SETUP_TOKEN_FILE"); file != "" {
+			content, err := os.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			raw = strings.TrimRight(string(content), "\r\n")
+		}
+	}
+	ttl := time.Hour
+	if value := os.Getenv("WATCHPOST_AGENT_SETUP_TOKEN_TTL"); value != "" {
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration <= 0 {
+			return fmt.Errorf("WATCHPOST_AGENT_SETUP_TOKEN_TTL: invalid value")
+		}
+		ttl = duration
+	}
+	if raw != "" {
+		return manager.StoreBootstrapToken(raw, time.Now().Add(ttl))
+	}
+	token, err := manager.GenerateBootstrapToken(ttl)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Watchpost Agent first-run setup requires a bootstrap token.\nToken: %s (expires %s)\n", token, time.Now().Add(ttl).Format(time.RFC3339))
+	return nil
 }
 
 func parseCIDRs(value string) ([]*net.IPNet, error) {

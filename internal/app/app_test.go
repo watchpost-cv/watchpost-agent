@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/watchpost-ops/watchpost-agent/internal/auth"
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
@@ -161,7 +162,7 @@ func TestTrustedProxyOriginHandling(t *testing.T) {
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
 	setupApp := func(trusted bool) http.Handler {
 		manager := auth.New(store)
-		_ = manager.Setup("admin@local", "admin-pass-1")
+		_ = manager.Setup("admin@local", "admin-pass-1", "")
 		return New(store, "test", fs.FS(assets), Options{TrustedProxy: trusted}).Handler()
 	}
 	login := func(handler http.Handler, forwardedProto, forwardedHost string) int {
@@ -185,5 +186,47 @@ func TestTrustedProxyOriginHandling(t *testing.T) {
 	// A trusted proxy claiming a different host must not match.
 	if got := login(setupApp(true), "https", "other.example"); got != http.StatusForbidden {
 		t.Fatalf("trusted proxy wrong forwarded host=%d want 403", got)
+	}
+}
+
+func TestRemoteSetupRequiresBootstrapToken(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "agent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := auth.New(store)
+	if err := manager.StoreBootstrapToken("remote-setup-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
+	handler := New(store, "test", fs.FS(assets), Options{SetupTokenRequired: true}).Handler()
+	bootstrap := httptest.NewRequest(http.MethodGet, "/api/v1/bootstrap", nil)
+	bootRec := httptest.NewRecorder()
+	handler.ServeHTTP(bootRec, bootstrap)
+	if !bytes.Contains(bootRec.Body.Bytes(), []byte(`"setup_token_required":true`)) {
+		t.Fatalf("bootstrap must report token required: %s", bootRec.Body.String())
+	}
+	noToken := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
+	noToken.Header.Set("Origin", "http://example.com")
+	noToken.Host = "example.com"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, noToken)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("setup without token=%d want 409", rec.Code)
+	}
+	withToken := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567","token":"remote-setup-token"}`))
+	withToken.Header.Set("Origin", "http://example.com")
+	withToken.Host = "example.com"
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, withToken)
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("setup with token=%d %s", rec2.Code, rec2.Body.String())
+	}
+	// The token is never disclosed by status or bootstrap.
+	status := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	statusRec := httptest.NewRecorder()
+	handler.ServeHTTP(statusRec, status)
+	if bytes.Contains(statusRec.Body.Bytes(), []byte("remote-setup-token")) {
+		t.Fatal("status disclosed the bootstrap token")
 	}
 }

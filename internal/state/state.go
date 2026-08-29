@@ -34,6 +34,16 @@ type LocalAuth struct {
 	PasswordHash string        `json:"password_hash,omitempty"`
 	Accounts     []Account     `json:"accounts,omitempty"`
 	Audit        []AuditEntry  `json:"audit,omitempty"`
+	Bootstrap    BootstrapToken `json:"bootstrap_token,omitempty"`
+}
+
+// BootstrapToken gates first-administrator setup when agent management is
+// remotely exposed. Only a hash is stored; the raw value is printed once at
+// startup or supplied through a protected file.
+type BootstrapToken struct {
+	Hash      string    `json:"hash,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	Consumed  bool      `json:"consumed,omitempty"`
 }
 
 // Account is a local administrator/technician/viewer account. Only the first

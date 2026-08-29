@@ -43,10 +43,40 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]sessionRecord
 	failures []time.Time
+	// bootstrapTokenRequired gates first-administrator setup behind a
+	// short-lived single-use token when agent management is remotely exposed.
+	bootstrapTokenRequired bool
 }
 
 func New(store *state.Store) *Manager {
 	return &Manager{state: store, sessions: map[string]sessionRecord{}}
+}
+
+func (m *Manager) SetBootstrapTokenRequired(required bool) { m.bootstrapTokenRequired = required }
+func (m *Manager) BootstrapTokenRequired() bool            { return m.bootstrapTokenRequired }
+
+// StoreBootstrapToken persists only a hash of the setup token.
+func (m *Manager) StoreBootstrapToken(raw string, expiresAt time.Time) error {
+	if raw == "" {
+		return errors.New("bootstrap token required")
+	}
+	return m.state.Update(func(current *state.State) error {
+		current.LocalAuth.Bootstrap = state.BootstrapToken{Hash: tokenHash(raw), ExpiresAt: expiresAt.UTC()}
+		return nil
+	})
+}
+
+// GenerateBootstrapToken issues a fresh token and returns the raw value
+// exactly once for printing.
+func (m *Manager) GenerateBootstrapToken(lifetime time.Duration) (string, error) {
+	raw, err := token(32)
+	if err != nil {
+		return "", err
+	}
+	if err := m.StoreBootstrapToken(raw, time.Now().Add(lifetime)); err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
 func (m *Manager) SetupRequired() bool {
@@ -58,7 +88,7 @@ func (m *Manager) SetupRequired() bool {
 // accounts or resolve to the wrong one.
 func NormalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
 
-func (m *Manager) Setup(email, password string) error {
+func (m *Manager) Setup(email, password, setupToken string) error {
 	if !strings.Contains(email, "@") || len(password) < MinimumPasswordLength {
 		return errors.New("valid email and password of at least 7 characters required")
 	}
@@ -66,6 +96,15 @@ func (m *Manager) Setup(email, password string) error {
 	return m.state.Update(func(current *state.State) error {
 		if len(current.LocalAuth.Accounts) != 0 {
 			return errors.New("local setup already completed")
+		}
+		// Bootstrap-token consumption and first-admin creation are one atomic
+		// state update: replaying a consumed or expired token fails closed.
+		if m.bootstrapTokenRequired {
+			bootstrap := current.LocalAuth.Bootstrap
+			if bootstrap.Consumed || !time.Now().Before(bootstrap.ExpiresAt) || subtle.ConstantTimeCompare([]byte(tokenHash(setupToken)), []byte(bootstrap.Hash)) != 1 {
+				return errors.New("bootstrap token required or invalid")
+			}
+			current.LocalAuth.Bootstrap.Consumed = true
 		}
 		salt, err := token(16)
 		if err != nil {

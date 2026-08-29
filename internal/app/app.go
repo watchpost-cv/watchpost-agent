@@ -23,6 +23,9 @@ type Options struct {
 	TrustedProxy  bool
 	AllowCIDRs    []*net.IPNet
 	DenyCIDRs     []*net.IPNet
+	// SetupTokenRequired gates first-administrator setup behind a bootstrap
+	// token when agent management is remotely exposed.
+	SetupTokenRequired bool
 }
 
 type App struct {
@@ -35,7 +38,9 @@ type App struct {
 }
 
 func New(store *state.Store, version string, assets fs.FS, options Options) *App {
-	return &App{state: store, auth: auth.New(store), version: version, assets: assets, pairing: pairing.New(store, version), options: options}
+	manager := auth.New(store)
+	manager.SetBootstrapTokenRequired(options.SetupTokenRequired)
+	return &App{state: store, auth: manager, version: version, assets: assets, pairing: pairing.New(store, version), options: options}
 }
 
 func (a *App) Handler() http.Handler {
@@ -68,7 +73,7 @@ func (a *App) bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 403, map[string]string{"error": "client address denied"})
 		return
 	}
-	response := map[string]any{"setup_required": a.auth.SetupRequired(), "authenticated": false}
+	response := map[string]any{"setup_required": a.auth.SetupRequired(), "setup_token_required": a.auth.BootstrapTokenRequired(), "authenticated": false}
 	if cookie, err := r.Cookie("watchpost_agent_session"); err == nil {
 		if session, ok := a.auth.Authenticate(cookie.Value); ok {
 			response["authenticated"] = true
@@ -87,11 +92,12 @@ func (a *App) setup(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		Token    string `json:"token"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	if err := a.auth.Setup(input.Email, input.Password); err != nil {
+	if err := a.auth.Setup(input.Email, input.Password, input.Token); err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}

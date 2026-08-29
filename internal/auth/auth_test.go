@@ -2,6 +2,8 @@ package auth
 
 import (
 	"path/filepath"
+	"sync"
+	"time"
 	"testing"
 
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
@@ -16,10 +18,10 @@ func TestSetupLoginAndSession(t *testing.T) {
 	if !manager.SetupRequired() {
 		t.Fatal("fresh agent did not require setup")
 	}
-	if err = manager.Setup("admin@local", "short"); err == nil {
+	if err = manager.Setup("admin@local", "short", ""); err == nil {
 		t.Fatal("short password accepted")
 	}
-	if err = manager.Setup("admin@local", "1234567"); err != nil {
+	if err = manager.Setup("admin@local", "1234567", ""); err != nil {
 		t.Fatal(err)
 	}
 	if manager.SetupRequired() {
@@ -41,7 +43,7 @@ func TestSetupLoginAndSession(t *testing.T) {
 func TestRoleCapabilities(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery"); err != nil {
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	admin, err := m.Login("admin@local", "correct-horse-battery")
@@ -69,7 +71,7 @@ func TestRoleCapabilities(t *testing.T) {
 func TestSessionRevocationAndPasswordChange(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery"); err != nil {
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	session1, _ := m.Login("admin@local", "correct-horse-battery")
@@ -94,7 +96,7 @@ func TestSessionRevocationAndPasswordChange(t *testing.T) {
 func TestSharedPasswordResolvesEachEmailToOwnIdentity(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "shared-password-1"); err != nil {
+	if err := m.Setup("admin@local", "shared-password-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.CreateAccount("tech@local", "shared-password-1", "technician"); err != nil {
@@ -122,7 +124,7 @@ func TestSharedPasswordResolvesEachEmailToOwnIdentity(t *testing.T) {
 func TestLoginRejectsUnknownEmailAndWrongPassword(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery"); err != nil {
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.Login("nobody@local", "correct-horse-battery"); err == nil {
@@ -136,7 +138,7 @@ func TestLoginRejectsUnknownEmailAndWrongPassword(t *testing.T) {
 func TestDuplicateEmailRejectedCaseInsensitively(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("Admin@Local", "correct-horse-battery"); err != nil {
+	if err := m.Setup("Admin@Local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.CreateAccount("admin@LOCAL", "another-password-1", "viewer"); err == nil {
@@ -153,7 +155,7 @@ func TestDuplicateEmailRejectedCaseInsensitively(t *testing.T) {
 func TestLoginNormalizesEmailCase(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("Admin@Example.COM", "correct-horse-battery"); err != nil {
+	if err := m.Setup("Admin@Example.COM", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	session, err := m.Login("  admin@example.com  ", "correct-horse-battery")
@@ -162,5 +164,87 @@ func TestLoginNormalizesEmailCase(t *testing.T) {
 	}
 	if session.User.Email != "admin@example.com" {
 		t.Fatalf("normalized email=%q", session.User.Email)
+	}
+}
+
+func TestBootstrapTokenRequiredForRemoteSetup(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	m.SetBootstrapTokenRequired(true)
+	token, err := m.GenerateBootstrapToken(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err == nil {
+		t.Fatal("setup without token succeeded")
+	}
+	if err := m.Setup("admin@local", "correct-horse-battery", "wrong-token"); err == nil {
+		t.Fatal("setup with wrong token succeeded")
+	}
+	if err := m.Setup("admin@local", "correct-horse-battery", token); err != nil {
+		t.Fatalf("setup with token failed: %v", err)
+	}
+	// Only a hash is persisted.
+	state := store.Snapshot()
+	if state.LocalAuth.Bootstrap.Hash == token || state.LocalAuth.Bootstrap.Hash == "" {
+		t.Fatal("raw token persisted instead of a hash")
+	}
+	// The consumed token cannot be replayed (setup is also complete).
+	if err := m.Setup("other@local", "correct-horse-battery", token); err == nil {
+		t.Fatal("second setup with the same token succeeded")
+	}
+}
+
+func TestBootstrapTokenExpiryFailsClosed(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	m.SetBootstrapTokenRequired(true)
+	if err := m.StoreBootstrapToken("expired-token", time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup("admin@local", "correct-horse-battery", "expired-token"); err == nil {
+		t.Fatal("setup with an expired token succeeded")
+	}
+}
+
+func TestLoopbackSetupRemainsDirectWithoutToken(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	if m.BootstrapTokenRequired() {
+		t.Fatal("loopback setup unexpectedly requires a token")
+	}
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatalf("direct loopback setup failed: %v", err)
+	}
+}
+
+func TestConcurrentSetupWithBootstrapTokenCreatesOneAdministrator(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	m.SetBootstrapTokenRequired(true)
+	token, err := m.GenerateBootstrapToken(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	results := make(chan bool, 2)
+	for _, email := range []string{"one@local", "two@local"} {
+		wg.Add(1)
+		go func(e string) {
+			defer wg.Done()
+			err := m.Setup(e, "correct-horse-battery", token)
+			results <- err == nil
+		}(email)
+	}
+	wg.Wait()
+	close(results)
+	successes := 0
+	for ok := range results {
+		if ok {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successes=%d want 1", successes)
 	}
 }
