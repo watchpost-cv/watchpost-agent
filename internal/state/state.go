@@ -18,6 +18,7 @@ type Connection struct {
 	PostID             string `json:"post_id,omitempty"`
 	Credential         string `json:"credential,omitempty"`
 	PreviousCredential string `json:"previous_credential,omitempty"`
+	RevocationPending  bool   `json:"revocation_pending,omitempty"`
 }
 
 type PendingPairing struct {

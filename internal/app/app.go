@@ -159,6 +159,9 @@ func (a *App) status(w http.ResponseWriter, _ *http.Request) {
 }
 
 func pairingState(value state.State) string {
+	if value.Connection.RevocationPending {
+		return "unpair_pending"
+	}
 	if value.Connection.Credential != "" {
 		return "paired"
 	}
@@ -209,8 +212,8 @@ func (a *App) collectorConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, input)
 }
 func (a *App) unpair(w http.ResponseWriter, r *http.Request) {
-	if err := a.state.Unpair(); err != nil {
-		writeJSON(w, 500, map[string]string{"error": "could not clear connection"})
+	if err := a.pairing.Unpair(r.Context()); err != nil {
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

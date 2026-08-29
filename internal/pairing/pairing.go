@@ -129,6 +129,60 @@ func (c *Client) Poll(ctx context.Context) (Status, error) {
 	}
 	return Status{State: result.State, Phrase: pending.Phrase, ExpiresAt: pending.ExpiresAt, PostID: result.PostID}, nil
 }
+// Unpair revokes the connection at Watchpost first, then clears local state.
+// When Watchpost is unreachable it records revocation-pending and retains the
+// credential so the revocation can be retried; authority is never silently
+// discarded locally.
+func (c *Client) Unpair(ctx context.Context) error {
+	current := c.state.Snapshot()
+	if current.Connection.Credential == "" {
+		return errors.New("agent is not paired")
+	}
+	err := c.requestServerUnpair(ctx, current)
+	if err == nil {
+		return c.state.Unpair()
+	}
+	if err := c.state.Update(func(value *state.State) error {
+		value.Connection.RevocationPending = true
+		value.Delivery.LastError = "unpair pending: " + err.Error()
+		return nil
+	}); err != nil {
+		return err
+	}
+	return fmt.Errorf("revocation pending: Watchpost unreachable, will retry automatically (%w)", err)
+}
+
+// RetryPendingRevocation continues an unpair that could not reach Watchpost.
+func (c *Client) RetryPendingRevocation(ctx context.Context) error {
+	current := c.state.Snapshot()
+	if !current.Connection.RevocationPending || current.Connection.Credential == "" {
+		return nil
+	}
+	if err := c.requestServerUnpair(ctx, current); err != nil {
+		return err
+	}
+	return c.state.Unpair()
+}
+
+func (c *Client) requestServerUnpair(ctx context.Context, current state.State) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(current.Connection.WatchpostURL, "/")+"/api/agent/v2/unpair", nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+current.Connection.Credential)
+	request.Header.Set("X-Watchpost-Installation", current.InstallationID)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	// A credential that Watchpost no longer recognizes is already revoked.
+	if response.StatusCode == http.StatusNoContent || response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	return fmt.Errorf("Watchpost rejected unpair (%d)", response.StatusCode)
+}
+
 func (c *Client) Rotate(ctx context.Context) error {
 	current := c.state.Snapshot()
 	if current.Connection.Credential == "" {

@@ -91,6 +91,11 @@ func deliveryLoop(ctx context.Context, store *state.Store) {
 			timer.Stop()
 			return
 		case <-timer.C:
+			current := store.Snapshot()
+			if current.Connection.RevocationPending && current.Connection.Credential != "" {
+				_ = pairing.New(store, version).RetryPendingRevocation(ctx)
+				continue
+			}
 			_ = telemetry.Send(ctx, store)
 		}
 	}
@@ -182,10 +187,10 @@ func localCommand(action string, arguments []string) error {
 		fmt.Printf("Collectors updated: every %d seconds.\n", config.IntervalSeconds)
 		return nil
 	case "unpair":
-		if err := store.Unpair(); err != nil {
+		if err := pairing.New(store, version).Unpair(context.Background()); err != nil {
 			return err
 		}
-		fmt.Println("Agent unpaired. Local configuration and administrator retained.")
+		fmt.Println("Agent unpaired. The connection was revoked at Watchpost; local configuration and administrator retained.")
 		return nil
 	case "rotate":
 		if err := pairing.New(store, version).Rotate(context.Background()); err != nil {
@@ -200,7 +205,7 @@ func localCommand(action string, arguments []string) error {
 		if err := store.Reset(*confirm); err != nil {
 			return err
 		}
-		fmt.Println("Agent reset. Run local setup before using the website again.")
+		fmt.Println("Agent reset. Warning: this does not revoke the connection centrally; an administrator must revoke it in Watchpost if this machine was lost.")
 		return nil
 	}
 	return fmt.Errorf("unknown local action")
