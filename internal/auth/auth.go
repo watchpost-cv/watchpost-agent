@@ -2,12 +2,15 @@ package auth
 
 import (
 	"context"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"hash"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +19,10 @@ import (
 )
 
 const MinimumPasswordLength = 7
+
+// passwordIterations is the PBKDF2-HMAC-SHA256 work factor used for local
+// account password hashes, matching the central server's established KDF.
+const passwordIterations = 210000
 
 type contextKey struct{}
 
@@ -114,9 +121,13 @@ func (m *Manager) Setup(email, password, setupToken string) error {
 		if err != nil {
 			return err
 		}
+		hash, err := hashPassword(password, salt)
+		if err != nil {
+			return err
+		}
 		current.LocalAuth.Salt = salt
-		current.LocalAuth.PasswordHash = passwordHash(password, salt)
-		current.LocalAuth.Accounts = []state.Account{{ID: id, Email: email, Salt: salt, PasswordHash: current.LocalAuth.PasswordHash, Role: "admin", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}}
+		current.LocalAuth.PasswordHash = hash
+		current.LocalAuth.Accounts = []state.Account{{ID: id, Email: email, Salt: salt, PasswordHash: hash, Role: "admin", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}}
 		current.LocalAuth.AppendAudit(email, "setup", "first administrator created")
 		return nil
 	})
@@ -143,7 +154,7 @@ func (m *Manager) Login(email, password string) (Session, error) {
 		if account.Email != email {
 			continue
 		}
-		if subtle.ConstantTimeCompare([]byte(passwordHash(password, account.Salt)), []byte(account.PasswordHash)) != 1 {
+		if !verifyPassword(password, account.Salt, account.PasswordHash) {
 			break
 		}
 		sessionToken, err := token(32)
@@ -218,7 +229,7 @@ func (m *Manager) ChangePassword(accountID, currentPassword, newPassword, keepTo
 			if account.ID != accountID {
 				continue
 			}
-			if subtle.ConstantTimeCompare([]byte(passwordHash(currentPassword, account.Salt)), []byte(account.PasswordHash)) != 1 {
+			if !verifyPassword(currentPassword, account.Salt, account.PasswordHash) {
 				errOut = errors.New("current password incorrect")
 				return errOut
 			}
@@ -226,8 +237,12 @@ func (m *Manager) ChangePassword(accountID, currentPassword, newPassword, keepTo
 			if err != nil {
 				return err
 			}
+			hash, err := hashPassword(newPassword, salt)
+			if err != nil {
+				return err
+			}
 			current.LocalAuth.Accounts[index].Salt = salt
-			current.LocalAuth.Accounts[index].PasswordHash = passwordHash(newPassword, salt)
+			current.LocalAuth.Accounts[index].PasswordHash = hash
 			current.LocalAuth.AppendAudit(account.Email, "password_change", "password rotated")
 			return nil
 		}
@@ -269,7 +284,11 @@ func (m *Manager) CreateAccount(email, password, role string) (Account, error) {
 		if err != nil {
 			return err
 		}
-		current.LocalAuth.Accounts = append(current.LocalAuth.Accounts, state.Account{ID: id, Email: email, Salt: salt, PasswordHash: passwordHash(password, salt), Role: role, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+		hash, err := hashPassword(password, salt)
+		if err != nil {
+			return err
+		}
+		current.LocalAuth.Accounts = append(current.LocalAuth.Accounts, state.Account{ID: id, Email: email, Salt: salt, PasswordHash: hash, Role: role, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 		created = Account{ID: id, Email: email, Role: role}
 		current.LocalAuth.AppendAudit("admin", "account_create", email+" role="+role)
 		return nil
@@ -306,13 +325,37 @@ func FromContext(ctx context.Context) (Session, bool) {
 	return session, ok
 }
 
-func passwordHash(password, salt string) string {
-	value := []byte(salt + "\x00" + password)
-	for i := 0; i < 210000; i++ {
-		sum := sha256.Sum256(value)
-		value = sum[:]
+// hashPassword derives a versioned PBKDF2-HMAC-SHA256 hash. The iteration
+// count is embedded so future work-factor changes remain verifiable.
+func hashPassword(password, salt string) (string, error) {
+	key, err := pbkdf2.Key[hash.Hash](sha256.New, password, []byte(salt), passwordIterations, 32)
+	if err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(value)
+	return "pbkdf2$" + strconv.Itoa(passwordIterations) + "$" + hex.EncodeToString(key), nil
+}
+
+// verifyPassword checks a versioned hash. Legacy unversioned hashes from the
+// previous custom iterated-SHA-256 construction cannot be verified and fail
+// closed; those accounts require re-setup after upgrade.
+func verifyPassword(password, salt, encoded string) bool {
+	parts := strings.SplitN(encoded, "$", 3)
+	if len(parts) != 3 || parts[0] != "pbkdf2" {
+		return false
+	}
+	iterations, err := strconv.Atoi(parts[1])
+	if err != nil || iterations < 1 {
+		return false
+	}
+	expected, err := hex.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+	key, err := pbkdf2.Key[hash.Hash](sha256.New, password, []byte(salt), iterations, len(expected))
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(key, expected) == 1
 }
 
 func token(size int) (string, error) {

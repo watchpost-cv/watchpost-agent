@@ -2,9 +2,10 @@ package auth
 
 import (
 	"path/filepath"
+	"strings"
 	"sync"
-	"time"
 	"testing"
+	"time"
 
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
 )
@@ -246,5 +247,28 @@ func TestConcurrentSetupWithBootstrapTokenCreatesOneAdministrator(t *testing.T) 
 	}
 	if successes != 1 {
 		t.Fatalf("successes=%d want 1", successes)
+	}
+}
+
+func TestPasswordHashesUseVersionedPBKDF2(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := store.Snapshot()
+	if len(snapshot.LocalAuth.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(snapshot.LocalAuth.Accounts))
+	}
+	account := snapshot.LocalAuth.Accounts[0]
+	if !strings.HasPrefix(account.PasswordHash, "pbkdf2$210000$") {
+		t.Fatalf("password hash is not versioned PBKDF2: %q", account.PasswordHash)
+	}
+	if session, err := m.Login("admin@local", "correct-horse-battery"); err != nil || session.User.Role != "admin" {
+		t.Fatalf("PBKDF2 login failed: %v", err)
+	}
+	// A legacy custom iterated-SHA-256 hash must fail closed, forcing re-setup.
+	if verifyPassword("correct-horse-battery", account.Salt, "deadbeef") {
+		t.Fatal("legacy unversioned hash verified")
 	}
 }
