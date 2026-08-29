@@ -184,17 +184,32 @@ func (s *Store) Snapshot() State {
 func (s *Store) Update(update func(*State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := s.data
+	next := s.cloneData()
 	if err := update(&next); err != nil {
 		return err
 	}
-	previous := s.data
-	s.data = next
-	if err := s.saveLocked(); err != nil {
-		s.data = previous
+	if err := s.saveState(next); err != nil {
 		return err
 	}
+	s.data = next
 	return nil
+}
+
+// cloneData returns a deep copy of the mutable slice-backed fields so an update
+// callback can never mutate slice storage the store still owns. A failed save
+// therefore leaves both the in-memory snapshot and the on-disk file unchanged.
+func (s *Store) cloneData() State {
+	src := s.data
+	next := src
+	next.LocalAuth.Accounts = append([]Account(nil), src.LocalAuth.Accounts...)
+	next.LocalAuth.Audit = append([]AuditEntry(nil), src.LocalAuth.Audit...)
+	next.Delivery.Queue = make([]json.RawMessage, len(src.Delivery.Queue))
+	for index, item := range src.Delivery.Queue {
+		copy := append([]byte(nil), item...)
+		next.Delivery.Queue[index] = json.RawMessage(copy)
+	}
+	next.Collectors.Filesystems = append([]string(nil), src.Collectors.Filesystems...)
+	return next
 }
 
 func (s *Store) Unpair() error {
@@ -212,20 +227,19 @@ func (s *Store) Reset(confirm string) error {
 	if confirm != s.data.InstallationID {
 		return errors.New("installation ID confirmation does not match")
 	}
-	previous := s.data
-	s.data = State{Version: Version, InstallationID: previous.InstallationID, CreatedAt: previous.CreatedAt, Collectors: DefaultCollectorConfig(), NextSequence: 1}
-	if err := s.saveLocked(); err != nil {
-		s.data = previous
+	next := State{Version: Version, InstallationID: s.data.InstallationID, CreatedAt: s.data.CreatedAt, Collectors: DefaultCollectorConfig(), NextSequence: 1}
+	if err := s.saveState(next); err != nil {
 		return err
 	}
+	s.data = next
 	return nil
 }
 
-func (s *Store) saveLocked() error {
+func (s *Store) saveState(value State) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(s.data, "", "  ")
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -246,6 +260,8 @@ func (s *Store) saveLocked() error {
 	}
 	return os.Rename(name, s.path)
 }
+
+func (s *Store) saveLocked() error { return s.saveState(s.data) }
 
 func installationID() (string, error) {
 	value := make([]byte, 16)
