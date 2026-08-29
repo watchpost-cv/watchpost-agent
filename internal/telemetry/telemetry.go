@@ -117,6 +117,11 @@ func flush(ctx context.Context, store *state.Store) error {
 			return err
 		}
 		defer response.Body.Close()
+		if response.StatusCode == http.StatusInsufficientStorage {
+			err = errors.New("Watchpost storage is full; retrying within bounded queue")
+			markFailure(store, err)
+			return err
+		}
 		if response.StatusCode != http.StatusAccepted {
 			err = fmt.Errorf("telemetry rejected (%d)", response.StatusCode)
 			markFailure(store, err)
