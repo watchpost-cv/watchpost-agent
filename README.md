@@ -56,20 +56,37 @@ Use `./watchpost-agent upgrade` after replacing the downloaded executable.
 It atomically replaces the stable installed binary and restarts the service
 without changing installation identity, local configuration, queue or pairing.
 
-The local website requires a seven-character-or-longer administrator password.
-For a headless server, configure the same state without exposing the password
-in process arguments:
+The local website requires an email address and a seven-character-or-longer
+administrator password. For a headless server, configure the same state without
+exposing the password in process arguments:
 
 ```sh
+printf '%s\n' 'admin@example.com' > /secure/path/agent-email
 printf '%s\n' 'your password' > /secure/path/agent-password
-chmod 600 /secure/path/agent-password
-./watchpost-agent setup --password-file /secure/path/agent-password
+chmod 600 /secure/path/agent-email /secure/path/agent-password
+./watchpost-agent setup --email-file /secure/path/agent-email --password-file /secure/path/agent-password
 ./watchpost-agent info --json
 ```
 
-Remove the temporary password file according to your system's secret-handling
-policy. The UI binds to loopback by default and enforces authenticated sessions,
+Remove the temporary files according to your system's secret-handling policy.
+The UI binds to loopback by default and enforces authenticated sessions,
 same-origin state changes, CSRF tokens, request bounds and login throttling.
+Local account passwords use the same versioned PBKDF2-HMAC-SHA256 derivation as
+the central server; passwords from older agent builds (custom iterated SHA-256)
+must be re-set with `reset` after upgrading. Login is by email and password;
+email identities are normalized (lowercase) so case differences cannot create
+duplicate accounts or sign into the wrong one.
+
+### First-run setup
+
+Setup over the loopback interface is direct. If agent management is remotely
+exposed (a non-loopback listener with `WATCHPOST_AGENT_EXPOSE=1`) or an
+operator supplied `WATCHPOST_AGENT_SETUP_TOKEN` / `WATCHPOST_AGENT_SETUP_TOKEN_FILE`,
+the first-run form requires a short-lived, single-use bootstrap token printed
+once to the agent console (or read from the protected file). Only a hash of the
+token is stored; it is consumed atomically with the first administrator's
+creation and is never returned by any API. `WATCHPOST_AGENT_SETUP_TOKEN_TTL`
+(default 1 hour) bounds its lifetime.
 
 ### Local roles
 
@@ -87,10 +104,17 @@ The interface defaults to loopback and is not a hardened internet service.
 Binding a non-loopback address requires an explicit
 `WATCHPOST_AGENT_EXPOSE=1` opt-in and prints a prominent warning. For any
 remote use terminate HTTPS at a reviewed reverse proxy, set
-`WATCHPOST_AGENT_SECURE_COOKIES=1`, enable `WATCHPOST_AGENT_TRUSTED_PROXY=1`
-so forwarded scheme/host are honoured for origin checks, restrict clients with
-`WATCHPOST_AGENT_ALLOW_CIDRS` / `WATCHPOST_AGENT_DENY_CIDRS`, and review the
-local audit log. Forwarded headers are never trusted by default.
+`WATCHPOST_AGENT_SECURE_COOKIES=1`, list the proxy in
+`WATCHPOST_AGENT_TRUSTED_PROXIES` (comma-separated CIDRs or addresses — for a
+local proxy use `127.0.0.0/8`) so forwarded scheme/host are honoured only when
+the immediate peer is that trusted proxy, and restrict clients with
+`WATCHPOST_AGENT_ALLOW_CIDRS` / `WATCHPOST_AGENT_DENY_CIDRS`. Forwarded headers
+from any untrusted peer are ignored, and when a client CIDR policy is active an
+unresolvable client address fails closed. The first-run setup requires a
+bootstrap token whenever the interface is remotely exposed or an operator
+supplied one (see "First-run setup"). Review the local audit log. Loopback
+binding remains the documented recovery path: with no client policy configured,
+requests are never blocked on address resolution.
 
 Pair from the local website, or use the equivalent flow on a headless server:
 

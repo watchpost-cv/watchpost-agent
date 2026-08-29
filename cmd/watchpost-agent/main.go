@@ -112,8 +112,9 @@ func deliveryLoop(ctx context.Context, store *state.Store) {
 func localCommand(action string, arguments []string) error {
 	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)
 	dataDir := flags.String("data-dir", defaultDataDir(), "private agent data directory")
-	passwordFile := flags.String("password-file", "", "file containing the local UI password")
+passwordFile := flags.String("password-file", "", "file containing the local UI password")
 	email := flags.String("email", "", "email address for the first local administrator")
+	emailFile := flags.String("email-file", "", "file containing the first local administrator email")
 	jsonOutput := flags.Bool("json", false, "print machine-readable status")
 	serverURL := flags.String("server", "", "Watchpost URL")
 	interval := flags.Int("interval", 60, "collection interval in seconds")
@@ -134,15 +135,23 @@ func localCommand(action string, arguments []string) error {
 		return err
 	}
 	switch action {
-	case "setup":
-		if *email == "" || *passwordFile == "" {
-			return fmt.Errorf("--email and --password-file are required")
+case "setup":
+		address := *email
+		if *emailFile != "" {
+			content, err := os.ReadFile(*emailFile)
+			if err != nil {
+				return err
+			}
+			address = strings.TrimRight(string(content), "\r\n")
+		}
+		if address == "" || *passwordFile == "" {
+			return fmt.Errorf("--email (or --email-file) and --password-file are required")
 		}
 		password, err := os.ReadFile(*passwordFile)
 		if err != nil {
 			return err
 		}
-if err = auth.New(store).Setup(*email, strings.TrimRight(string(password), "\r\n"), ""); err != nil {
+		if err = auth.New(store).Setup(address, strings.TrimRight(string(password), "\r\n"), ""); err != nil {
 			return err
 		}
 		fmt.Println("Local agent administrator configured.")

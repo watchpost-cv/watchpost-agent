@@ -32,20 +32,30 @@ user-managed inventory object.
 The embedded UI listens on loopback only. Non-loopback access is explicitly
 experimental: binding a non-loopback interface requires `WATCHPOST_AGENT_EXPOSE=1`
 and prints a prominent warning. Remote use must terminate HTTPS at a reviewed
-reverse proxy, enable secure cookies and explicit proxy trust, restrict client
-CIDRs, and rely on the local role model and audit log. Forwarded headers are
-never trusted by default. Pairing and delivery use HTTPS except when both
-programs communicate over loopback for local development.
+reverse proxy, enable secure cookies, list the proxy in
+`WATCHPOST_AGENT_TRUSTED_PROXIES` so forwarded headers are believed only from a
+trusted immediate peer, restrict client CIDRs (failing closed when an address
+policy cannot resolve the client), and rely on the local role model and audit
+log. First-run setup over a non-loopback interface (or with an operator-supplied
+token) requires a short-lived single-use bootstrap token printed once at
+startup; only a hash is stored and it is consumed atomically with the first
+administrator's creation. Forwarded headers are never trusted from an untrusted
+peer. Pairing and delivery use HTTPS except when both programs communicate over
+loopback for local development.
 
 ## Local roles
 
-The first setup creates a local `admin`. `admin` manages local accounts
-(technician/viewer), pairing authority, credentials, remote exposure and
-destructive lifecycle operations; `technician` inspects health, configures
-collectors and performs normal pairing and recovery; `viewer` is read-only.
-Local accounts are independent of Watchpost sessions: the agent must remain
-manageable when Watchpost is unavailable. State-changing local operations are
-recorded in a bounded local audit log.
+The first setup creates a local `admin` with a chosen email address. `admin`
+manages local accounts (technician/viewer), pairing authority, credentials,
+remote exposure and destructive lifecycle operations; `technician` inspects
+health, configures collectors and performs normal pairing and recovery; `viewer`
+is read-only. Login is by email and password, and identities are normalized
+(lowercase) so case differences cannot collide. Local accounts are independent
+of Watchpost sessions: the agent must remain manageable when Watchpost is
+unavailable. State-changing local operations are recorded in a bounded local
+audit log. Local password hashes use the same versioned PBKDF2-HMAC-SHA256
+derivation as the central server; hashes from older agent builds must be
+re-established with `reset`.
 
 ## Lifecycle
 
