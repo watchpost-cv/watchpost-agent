@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net"
 	"net/http"
@@ -17,10 +18,12 @@ import (
 
 // Options carries remote-management security configuration. Loopback binding
 // is the primary access control; the options below harden explicit remote
-// exposure.
+// exposure. TrustedProxies is an explicit set of CIDRs (or addresses) whose
+// Forwarded/X-Forwarded-* headers may be believed; forwarded headers from any
+// other immediate peer are ignored.
 type Options struct {
 	SecureCookies bool
-	TrustedProxy  bool
+	TrustedProxies []*net.IPNet
 	AllowCIDRs    []*net.IPNet
 	DenyCIDRs     []*net.IPNet
 	// SetupTokenRequired gates first-administrator setup behind a bootstrap
@@ -187,8 +190,9 @@ func decode(w http.ResponseWriter, r *http.Request, value any) bool {
 }
 
 // sameOrigin accepts a request whose Origin matches the effective scheme and
-// host. Forwarded scheme/host are trusted only when TrustedProxy is explicitly
-// enabled; they are never trusted by default.
+// host. Forwarded scheme/host are honoured only when the immediate peer is in
+// the explicitly configured trusted-proxy set; they are never trusted from an
+// untrusted peer.
 func (a *App) sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -199,7 +203,7 @@ func (a *App) sameOrigin(r *http.Request) bool {
 		scheme = "https"
 	}
 	host := r.Host
-	if a.options.TrustedProxy {
+	if peer, ok := a.immediatePeer(r); ok && a.isTrustedProxy(peer) {
 		if forwarded := r.Header.Get("X-Forwarded-Proto"); forwarded != "" {
 			scheme = forwarded
 		}
@@ -210,18 +214,18 @@ func (a *App) sameOrigin(r *http.Request) bool {
 	return strings.EqualFold(origin, scheme+"://"+host)
 }
 
-// clientAllowed applies optional CIDR allow/deny rules to the remote address.
-// Loopback is always allowed (loopback binding is the primary control); rules
-// only gate explicit remote exposure.
+// clientAllowed resolves the verified client address and applies optional
+// allow/deny CIDR rules to it. Forwarded headers are followed only through
+// trusted proxies. When any address policy is active, an unresolvable client
+// address fails closed.
 func (a *App) clientAllowed(r *http.Request) bool {
 	if len(a.options.AllowCIDRs) == 0 && len(a.options.DenyCIDRs) == 0 {
 		return true
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	ip, err := a.resolveClientIP(r)
 	if err != nil {
-		return true
+		return false
 	}
-	ip := net.ParseIP(host)
 	if ip == nil || ip.IsLoopback() {
 		return true
 	}
@@ -232,6 +236,98 @@ func (a *App) clientAllowed(r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func (a *App) policyActive() bool {
+	return len(a.options.AllowCIDRs) > 0 || len(a.options.DenyCIDRs) > 0 || len(a.options.TrustedProxies) > 0
+}
+
+// immediatePeer parses the direct TCP peer from RemoteAddr.
+func (a *App) immediatePeer(r *http.Request) (net.IP, bool) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip := net.ParseIP(strings.Trim(r.RemoteAddr, "[]"))
+		if ip == nil {
+			return nil, false
+		}
+		return ip, true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return nil, false
+	}
+	return ip, true
+}
+
+func (a *App) isTrustedProxy(ip net.IP) bool {
+	for _, network := range a.options.TrustedProxies {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveClientIP follows the forwarded chain through trusted proxies and
+// returns the first untrusted address (the real client). It fails closed with
+// an error when the client address cannot be resolved while a policy is
+// active, or when a trusted proxy supplies no usable forwarded client.
+func (a *App) resolveClientIP(r *http.Request) (net.IP, error) {
+	peer, ok := a.immediatePeer(r)
+	if !ok {
+		if a.policyActive() {
+			return nil, errors.New("client address could not be resolved")
+		}
+		return nil, nil
+	}
+	if !a.isTrustedProxy(peer) {
+		return peer, nil
+	}
+	chain, ok := forwardedChain(r)
+	if !ok {
+		if a.policyActive() {
+			return nil, errors.New("trusted proxy supplied no usable forwarded client")
+		}
+		return peer, nil
+	}
+	for index := len(chain) - 1; index >= 0; index-- {
+		if !a.isTrustedProxy(chain[index]) {
+			return chain[index], nil
+		}
+	}
+	return nil, errors.New("no untrusted client in forwarded chain")
+}
+
+// forwardedChain parses X-Forwarded-For (and, as a fallback, the Forwarded
+// `for=` field) into IP addresses. Malformed values fail closed.
+func forwardedChain(r *http.Request) ([]net.IP, bool) {
+	if value := r.Header.Get("X-Forwarded-For"); value != "" {
+		ips := []net.IP{}
+		for _, part := range strings.Split(value, ",") {
+			ip := net.ParseIP(strings.TrimSpace(strings.Trim(part, "[]")))
+			if ip == nil {
+				return nil, false
+			}
+			ips = append(ips, ip)
+		}
+		return ips, len(ips) > 0
+	}
+	if value := r.Header.Get("Forwarded"); value != "" {
+		for _, element := range strings.Split(value, ";") {
+			element = strings.TrimSpace(element)
+			if !strings.HasPrefix(strings.ToLower(element), "for=") {
+				continue
+			}
+			raw := strings.TrimSpace(element[4:])
+			raw = strings.Trim(raw, `"`)
+			ip := net.ParseIP(strings.Trim(raw, "[]"))
+			if ip == nil {
+				return nil, false
+			}
+			return []net.IP{ip}, true
+		}
+	}
+	return nil, false
 }
 
 func cidrMatch(nets []*net.IPNet, ip net.IP) bool {

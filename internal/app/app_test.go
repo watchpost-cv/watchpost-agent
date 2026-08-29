@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -154,19 +155,36 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	}
 }
 
-func TestTrustedProxyOriginHandling(t *testing.T) {
+func trustedProxyOptions(trusted bool, allow, deny string) Options {
+	opts := Options{}
+	if trusted {
+		opts.TrustedProxies = []*net.IPNet{{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(32, 32)}}
+	}
+	if allow != "" {
+		_, network, _ := net.ParseCIDR(allow)
+		opts.AllowCIDRs = []*net.IPNet{network}
+	}
+	if deny != "" {
+		_, network, _ := net.ParseCIDR(deny)
+		opts.DenyCIDRs = []*net.IPNet{network}
+	}
+	return opts
+}
+
+func TestProxyOriginHandlingRequiresTrustedPeer(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "agent.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
-	setupApp := func(trusted bool) http.Handler {
+	setupApp := func(opts Options) http.Handler {
 		manager := auth.New(store)
 		_ = manager.Setup("admin@local", "admin-pass-1", "")
-		return New(store, "test", fs.FS(assets), Options{TrustedProxy: trusted}).Handler()
+		return New(store, "test", fs.FS(assets), opts).Handler()
 	}
-	login := func(handler http.Handler, forwardedProto, forwardedHost string) int {
+	login := func(handler http.Handler, remoteAddr, forwardedProto, forwardedHost string) int {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"email":"admin@local","password":"admin-pass-1"}`))
+		request.RemoteAddr = remoteAddr
 		request.Header.Set("Origin", "https://proxy.example")
 		request.Host = "127.0.0.1:8090"
 		request.Header.Set("X-Forwarded-Proto", forwardedProto)
@@ -175,17 +193,98 @@ func TestTrustedProxyOriginHandling(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		return response.Code
 	}
-	// With an explicitly trusted proxy, forwarded https origin matches.
-	if got := login(setupApp(true), "https", "proxy.example"); got != http.StatusOK {
+	trusted := trustedProxyOptions(true, "", "")
+	// A trusted peer's forwarded https origin is honoured.
+	if got := login(setupApp(trusted), "127.0.0.1:9999", "https", "proxy.example"); got != http.StatusOK {
 		t.Fatalf("trusted proxy login=%d want 200", got)
 	}
-	// Without trust, the forwarded https origin is refused (the server sees http).
-	if got := login(setupApp(false), "https", "proxy.example"); got != http.StatusForbidden {
-		t.Fatalf("untrusted forwarded scheme login=%d want 403", got)
+	// An untrusted peer's forwarded https origin is refused (spoofing).
+	untrusted := trustedProxyOptions(false, "", "")
+	if got := login(setupApp(untrusted), "192.0.2.5:9999", "https", "proxy.example"); got != http.StatusForbidden {
+		t.Fatalf("untrusted peer spoofed origin login=%d want 403", got)
 	}
 	// A trusted proxy claiming a different host must not match.
-	if got := login(setupApp(true), "https", "other.example"); got != http.StatusForbidden {
+	if got := login(setupApp(trusted), "127.0.0.1:9999", "https", "other.example"); got != http.StatusForbidden {
 		t.Fatalf("trusted proxy wrong forwarded host=%d want 403", got)
+	}
+}
+
+func TestClientAddressResolutionThroughTrustedProxies(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "agent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
+	opts := trustedProxyOptions(true, "", "")
+	opts.TrustedProxies = []*net.IPNet{{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(32, 32)}, {IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)}}
+	_, v4, _ := net.ParseCIDR("192.0.2.0/24")
+	_, v6, _ := net.ParseCIDR("2001:db8::/32")
+	opts.AllowCIDRs = []*net.IPNet{v4, v6}
+	handler := New(store, "test", fs.FS(assets), opts).Handler()
+
+	status := func(remoteAddr, xff string) int {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+		request.RemoteAddr = remoteAddr
+		if xff != "" {
+			request.Header.Set("X-Forwarded-For", xff)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	// Allowed client through a trusted proxy.
+	if got := status("127.0.0.1:9999", "192.0.2.10"); got != http.StatusUnauthorized {
+		t.Fatalf("allowed proxied client=%d want 401", got)
+	}
+	// Denied client through a trusted proxy.
+	if got := status("127.0.0.1:9999", "198.51.100.5"); got != http.StatusForbidden {
+		t.Fatalf("denied proxied client=%d want 403", got)
+	}
+	// Direct spoofing: an untrusted peer's X-Forwarded-For must not bypass deny.
+	if got := status("198.51.100.5:9999", "192.0.2.10"); got != http.StatusForbidden {
+		t.Fatalf("untrusted peer spoofed XFF=%d want 403", got)
+	}
+	// Multiple trusted hops resolve to the first untrusted address.
+	if got := status("10.1.1.1:9999", "192.0.2.10, 10.2.2.2"); got != http.StatusUnauthorized {
+		t.Fatalf("multi-hop proxied client=%d want 401", got)
+	}
+	// IPv6 client through a trusted proxy.
+	if got := status("127.0.0.1:9999", "2001:db8::1"); got != http.StatusUnauthorized {
+		t.Fatalf("ipv6 proxied client=%d want 401", got)
+	}
+	// IPv6 client outside the allow list is denied.
+	if got := status("127.0.0.1:9999", "2001:db9::1"); got != http.StatusForbidden {
+		t.Fatalf("ipv6 unallowed client=%d want 403", got)
+	}
+	// Malformed forwarded header from a trusted proxy fails closed.
+	if got := status("127.0.0.1:9999", "not-an-ip"); got != http.StatusForbidden {
+		t.Fatalf("malformed XFF=%d want 403", got)
+	}
+	// Unresolvable RemoteAddr with a policy active fails closed.
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	request.RemoteAddr = "not-an-address"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("unresolvable remote with policy=%d want 403", response.Code)
+	}
+}
+
+func TestClientResolutionFailsOpenWithoutPolicyOnLoopbackRecovery(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "agent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
+	handler := New(store, "test", fs.FS(assets), Options{}).Handler()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	request.RemoteAddr = "not-an-address"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	// No policy active: the loopback recovery path lets the request proceed
+	// to authentication (401 rather than a policy denial).
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("no-policy unresolvable remote=%d want 401", response.Code)
 	}
 }
 

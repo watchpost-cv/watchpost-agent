@@ -273,7 +273,6 @@ func defaultDataDir() string {
 func appOptions(listen string) (app.Options, error) {
 	options := app.Options{
 		SecureCookies: envBool("WATCHPOST_AGENT_SECURE_COOKIES"),
-		TrustedProxy:  envBool("WATCHPOST_AGENT_TRUSTED_PROXY"),
 	}
 	host, _, err := net.SplitHostPort(listen)
 	if err != nil {
@@ -286,7 +285,7 @@ func appOptions(listen string) (app.Options, error) {
 	if !loopback {
 		fmt.Fprintf(os.Stderr, "WARNING: Watchpost Agent interface is bound to %s (non-loopback).\nThis is experimental. Terminate HTTPS at a reverse proxy, enable WATCHPOST_AGENT_SECURE_COOKIES, restrict client CIDRs, and review the local audit log.\n", listen)
 	}
-	allow, err := parseCIDRs(os.Getenv("WATCHPOST_AGENT_ALLOW_CIDRS"))
+allow, err := parseCIDRs(os.Getenv("WATCHPOST_AGENT_ALLOW_CIDRS"))
 	if err != nil {
 		return options, err
 	}
@@ -294,8 +293,13 @@ func appOptions(listen string) (app.Options, error) {
 	if err != nil {
 		return options, err
 	}
+	trusted, err := parseCIDRs(os.Getenv("WATCHPOST_AGENT_TRUSTED_PROXIES"))
+	if err != nil {
+		return options, err
+	}
 	options.AllowCIDRs = allow
 	options.DenyCIDRs = deny
+	options.TrustedProxies = trusted
 	// First-admin setup requires a bootstrap token whenever agent management is
 	// remotely exposed or an operator-supplied token is configured.
 	operatorToken := os.Getenv("WATCHPOST_AGENT_SETUP_TOKEN") != "" || os.Getenv("WATCHPOST_AGENT_SETUP_TOKEN_FILE") != ""
@@ -350,11 +354,20 @@ func parseCIDRs(value string) ([]*net.IPNet, error) {
 		if part == "" {
 			continue
 		}
-		_, network, err := net.ParseCIDR(part)
-		if err != nil {
-			return nil, fmt.Errorf("invalid agent CIDR %q", part)
+		if _, network, err := net.ParseCIDR(part); err == nil {
+			nets = append(nets, network)
+			continue
 		}
-		nets = append(nets, network)
+		// Bare addresses are treated as exact hosts.
+		if ip := net.ParseIP(strings.Trim(part, "[]")); ip != nil {
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		return nil, fmt.Errorf("invalid agent CIDR or address %q", part)
 	}
 	return nets, nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,5 +95,23 @@ func TestProvisionSetupTokenStoresOnlyHash(t *testing.T) {
 	}
 	if snapshot.LocalAuth.Bootstrap.ExpiresAt.IsZero() {
 		t.Fatal("bootstrap token expiry missing")
+	}
+}
+
+func TestAppOptionsParseTrustedProxies(t *testing.T) {
+	t.Setenv("WATCHPOST_AGENT_TRUSTED_PROXIES", "127.0.0.0/8,10.0.0.5,::1")
+	options, err := appOptions("127.0.0.1:8090")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options.TrustedProxies) != 3 {
+		t.Fatalf("trusted proxies=%d want 3", len(options.TrustedProxies))
+	}
+	if !options.TrustedProxies[1].Contains(net.ParseIP("10.0.0.5")) || options.TrustedProxies[1].Contains(net.ParseIP("10.0.0.6")) {
+		t.Fatalf("bare IPv4 trusted proxy not treated as an exact host: %v", options.TrustedProxies[1])
+	}
+	t.Setenv("WATCHPOST_AGENT_TRUSTED_PROXIES", "not-a-cidr")
+	if _, err := appOptions("127.0.0.1:8090"); err == nil {
+		t.Fatal("invalid trusted proxy accepted")
 	}
 }
