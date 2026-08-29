@@ -30,10 +30,10 @@ type PendingPairing struct {
 }
 
 type LocalAuth struct {
-	Salt         string        `json:"salt,omitempty"`
-	PasswordHash string        `json:"password_hash,omitempty"`
-	Accounts     []Account     `json:"accounts,omitempty"`
-	Audit        []AuditEntry  `json:"audit,omitempty"`
+	Salt         string         `json:"salt,omitempty"`
+	PasswordHash string         `json:"password_hash,omitempty"`
+	Accounts     []Account      `json:"accounts,omitempty"`
+	Audit        []AuditEntry   `json:"audit,omitempty"`
 	Bootstrap    BootstrapToken `json:"bootstrap_token,omitempty"`
 }
 

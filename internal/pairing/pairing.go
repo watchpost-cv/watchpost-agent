@@ -129,6 +129,7 @@ func (c *Client) Poll(ctx context.Context) (Status, error) {
 	}
 	return Status{State: result.State, Phrase: pending.Phrase, ExpiresAt: pending.ExpiresAt, PostID: result.PostID}, nil
 }
+
 // Unpair revokes the connection at Watchpost first, then clears local state.
 // When Watchpost is unreachable it records revocation-pending and retains the
 // credential so the revocation can be retried; authority is never silently

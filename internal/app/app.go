@@ -22,10 +22,10 @@ import (
 // Forwarded/X-Forwarded-* headers may be believed; forwarded headers from any
 // other immediate peer are ignored.
 type Options struct {
-	SecureCookies bool
+	SecureCookies  bool
 	TrustedProxies []*net.IPNet
-	AllowCIDRs    []*net.IPNet
-	DenyCIDRs     []*net.IPNet
+	AllowCIDRs     []*net.IPNet
+	DenyCIDRs      []*net.IPNet
 	// SetupTokenRequired gates first-administrator setup behind a bootstrap
 	// token when agent management is remotely exposed.
 	SetupTokenRequired bool

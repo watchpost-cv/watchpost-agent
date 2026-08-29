@@ -112,7 +112,7 @@ func deliveryLoop(ctx context.Context, store *state.Store) {
 func localCommand(action string, arguments []string) error {
 	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)
 	dataDir := flags.String("data-dir", defaultDataDir(), "private agent data directory")
-passwordFile := flags.String("password-file", "", "file containing the local UI password")
+	passwordFile := flags.String("password-file", "", "file containing the local UI password")
 	email := flags.String("email", "", "email address for the first local administrator")
 	emailFile := flags.String("email-file", "", "file containing the first local administrator email")
 	jsonOutput := flags.Bool("json", false, "print machine-readable status")
@@ -135,7 +135,7 @@ passwordFile := flags.String("password-file", "", "file containing the local UI 
 		return err
 	}
 	switch action {
-case "setup":
+	case "setup":
 		address := *email
 		if *emailFile != "" {
 			content, err := os.ReadFile(*emailFile)
@@ -294,7 +294,7 @@ func appOptions(listen string) (app.Options, error) {
 	if !loopback {
 		fmt.Fprintf(os.Stderr, "WARNING: Watchpost Agent interface is bound to %s (non-loopback).\nThis is experimental. Terminate HTTPS at a reverse proxy, enable WATCHPOST_AGENT_SECURE_COOKIES, restrict client CIDRs, and review the local audit log.\n", listen)
 	}
-allow, err := parseCIDRs(os.Getenv("WATCHPOST_AGENT_ALLOW_CIDRS"))
+	allow, err := parseCIDRs(os.Getenv("WATCHPOST_AGENT_ALLOW_CIDRS"))
 	if err != nil {
 		return options, err
 	}

@@ -366,7 +366,10 @@ func token(size int) (string, error) {
 	return hex.EncodeToString(value), nil
 }
 
-func tokenHash(token string) string { sum := sha256.Sum256([]byte(token)); return hex.EncodeToString(sum[:]) }
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
 
 func Cookie(r *http.Request, session Session, secure bool) *http.Cookie {
 	return &http.Cookie{Name: "watchpost_agent_session", Value: session.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil || secure, MaxAge: 86400}
