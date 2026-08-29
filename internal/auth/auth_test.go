@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,7 +38,9 @@ func TestSetupLoginAndSession(t *testing.T) {
 	if _, ok := manager.Authenticate(session.Token); !ok {
 		t.Fatal("session not accepted")
 	}
-	manager.Logout(session.Token)
+	if err := manager.Logout(session.Token); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := manager.Authenticate(session.Token); ok {
 		t.Fatal("logged-out session accepted")
 	}
@@ -88,7 +91,11 @@ func TestSessionRevocationAndPasswordChange(t *testing.T) {
 	if _, ok := m.Authenticate(session1.Token); !ok {
 		t.Fatal("current session revoked")
 	}
-	if removed := m.RevokeUserSessions("admin@local", session1.User.ID); removed < 1 {
+	removed, err := m.RevokeUserSessions("admin@local", session1.User.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed < 1 {
 		t.Fatalf("revoke sessions removed=%d", removed)
 	}
 	if _, ok := m.Authenticate(session1.Token); ok {
@@ -378,8 +385,8 @@ func TestVerifyPasswordRejectsMalformedAndBoundedEncodings(t *testing.T) {
 	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$aa") {
 		t.Fatal("truncated derived key accepted")
 	}
-	// Oversized derived key.
-	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$"+strings.Repeat("aa", 32)) {
+	// Oversized derived key (33+ decoded bytes).
+	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$"+strings.Repeat("aa", 33)) {
 		t.Fatal("oversized derived key accepted")
 	}
 	// Out-of-bound work factors.
@@ -399,5 +406,161 @@ func TestVerifyPasswordRejectsMalformedAndBoundedEncodings(t *testing.T) {
 	// A wrong password with an otherwise valid hash must still fail.
 	if verifyPassword("wrong-password", salt, account.PasswordHash) {
 		t.Fatal("wrong password verified")
+	}
+}
+
+func breakNextSave(path string) {
+	if err := os.Remove(path); err != nil {
+		panic(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		panic(err)
+	}
+}
+
+func TestLoginAuditFailureCreatesNoSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	session, err := m.Login("admin@local", "correct-horse-battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.sessions) != 1 {
+		t.Fatalf("sessions=%d want 1", len(m.sessions))
+	}
+	breakNextSave(path)
+	if _, err := m.Login("admin@local", "correct-horse-battery"); !errors.Is(err, ErrAuditPersistence) {
+		t.Fatalf("login with broken save err=%v want ErrAuditPersistence", err)
+	}
+	if len(m.sessions) != 1 {
+		t.Fatalf("failed login created a session: %d", len(m.sessions))
+	}
+	if got := len(auditEntries(store, "login")); got != 1 {
+		t.Fatalf("login audit rows=%d want 1", got)
+	}
+	if _, ok := m.Authenticate(session.Token); !ok {
+		t.Fatal("existing session invalidated by failed login")
+	}
+}
+
+func TestLogoutAuditFailureLeavesSessionValid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	session, err := m.Login("admin@local", "correct-horse-battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakNextSave(path)
+	if err := m.Logout(session.Token); !errors.Is(err, ErrAuditPersistence) {
+		t.Fatalf("logout with broken save err=%v want ErrAuditPersistence", err)
+	}
+	if _, ok := m.Authenticate(session.Token); !ok {
+		t.Fatal("session revoked on failed logout")
+	}
+	if got := len(auditEntries(store, "logout")); got != 0 {
+		t.Fatalf("logout audit rows=%d want 0", got)
+	}
+}
+
+func TestRevokeAuditFailureLeavesSessionsValid(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	first, err := m.Login("admin@local", "correct-horse-battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.Login("admin@local", "correct-horse-battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.sessions) != 2 {
+		t.Fatalf("sessions=%d want 2", len(m.sessions))
+	}
+	breakNextSave(path)
+	if _, err := m.RevokeUserSessions("admin@local", first.User.ID); !errors.Is(err, ErrAuditPersistence) {
+		t.Fatalf("revoke with broken save err=%v want ErrAuditPersistence", err)
+	}
+	if len(m.sessions) != 2 {
+		t.Fatalf("sessions revoked on failed audit: %d", len(m.sessions))
+	}
+	if _, ok := m.Authenticate(first.Token); !ok {
+		t.Fatal("targeted session revoked on failed audit")
+	}
+	if _, ok := m.Authenticate(second.Token); !ok {
+		t.Fatal("second session revoked on failed audit")
+	}
+	if got := len(auditEntries(store, "account_revoke_sessions")); got != 0 {
+		t.Fatalf("revoke audit rows=%d want 0", got)
+	}
+}
+
+func TestSuccessfulSessionEventsEmitSingleAttributedAudit(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateAccount("admin@local", "tech@local", "1234567", "technician"); err != nil {
+		t.Fatal(err)
+	}
+	adminSession, err := m.Login("admin@local", "correct-horse-battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	techSession, err := m.Login("tech@local", "1234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginRows := auditEntries(store, "login")
+	if len(loginRows) != 2 {
+		t.Fatalf("login rows=%d want 2", len(loginRows))
+	}
+	if loginRows[0].Actor != "admin@local" || loginRows[1].Actor != "tech@local" {
+		t.Fatalf("login actors=%q,%q", loginRows[0].Actor, loginRows[1].Actor)
+	}
+	if err := m.Logout(techSession.Token); err != nil {
+		t.Fatal(err)
+	}
+	logoutRows := auditEntries(store, "logout")
+	if len(logoutRows) != 1 {
+		t.Fatalf("logout rows=%d want 1", len(logoutRows))
+	}
+	if logoutRows[0].Actor != "tech@local" {
+		t.Fatalf("logout actor=%q want tech@local", logoutRows[0].Actor)
+	}
+	removed, err := m.RevokeUserSessions("admin@local", adminSession.User.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("revoked=%d want 1", removed)
+	}
+	revokeRows := auditEntries(store, "account_revoke_sessions")
+	if len(revokeRows) != 1 {
+		t.Fatalf("revoke rows=%d want 1", len(revokeRows))
+	}
+	if revokeRows[0].Actor != "admin@local" || revokeRows[0].Detail != "account="+adminSession.User.ID {
+		t.Fatalf("revoke actor=%q detail=%q", revokeRows[0].Actor, revokeRows[0].Detail)
 	}
 }

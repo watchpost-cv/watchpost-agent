@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -327,5 +328,125 @@ func TestRemoteSetupRequiresBootstrapToken(t *testing.T) {
 	handler.ServeHTTP(statusRec, status)
 	if bytes.Contains(statusRec.Body.Bytes(), []byte("remote-setup-token")) {
 		t.Fatal("status disclosed the bootstrap token")
+	}
+}
+
+func sessionFromLogin(t *testing.T, handler http.Handler) (*http.Cookie, string) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
+	request.Header.Set("Origin", "http://example.com")
+	request.Host = "example.com"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("login=%d %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatal("expected a session cookie")
+	}
+	return cookies[0], body.CSRF
+}
+
+func TestLogoutEndpointReportsAuditFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(store, "test", fstest.MapFS{}, Options{}).Handler()
+	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
+	setupRequest.Header.Set("Origin", "http://example.com")
+	setupRequest.Host = "example.com"
+	setupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(setupResponse, setupRequest)
+	if setupResponse.Code != http.StatusNoContent {
+		t.Fatalf("setup=%d", setupResponse.Code)
+	}
+	cookie, csrf := sessionFromLogin(t, handler)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/logout", nil)
+	request.AddCookie(cookie)
+	request.Header.Set("X-Watchpost-Agent-CSRF", csrf)
+	request.Header.Set("Origin", "http://example.com")
+	request.Host = "example.com"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("logout=%d want 500", response.Code)
+	}
+	status := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	status.AddCookie(cookie)
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, status)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("session not valid after failed logout: %d", statusResponse.Code)
+	}
+}
+
+func TestRevokeSessionsEndpointReportsAuditFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(store, "test", fstest.MapFS{}, Options{}).Handler()
+	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
+	setupRequest.Header.Set("Origin", "http://example.com")
+	setupRequest.Host = "example.com"
+	setupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(setupResponse, setupRequest)
+	if setupResponse.Code != http.StatusNoContent {
+		t.Fatalf("setup=%d", setupResponse.Code)
+	}
+	cookie, csrf := sessionFromLogin(t, handler)
+	accountsRequest := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
+	accountsRequest.AddCookie(cookie)
+	accountsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(accountsResponse, accountsRequest)
+	var accounts struct {
+		Accounts []struct {
+			ID string `json:"id"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(accountsResponse.Body.Bytes(), &accounts); err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts.Accounts) != 1 {
+		t.Fatalf("accounts=%d want 1", len(accounts.Accounts))
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/accounts/"+accounts.Accounts[0].ID+"/revoke-sessions", nil)
+	request.AddCookie(cookie)
+	request.Header.Set("X-Watchpost-Agent-CSRF", csrf)
+	request.Header.Set("Origin", "http://example.com")
+	request.Host = "example.com"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("revoke=%d want 500", response.Code)
+	}
+	status := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	status.AddCookie(cookie)
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, status)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("session not valid after failed revoke: %d", statusResponse.Code)
 	}
 }

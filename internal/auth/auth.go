@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash"
 	"net/http"
 	"strconv"
@@ -17,6 +18,10 @@ import (
 
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
 )
+
+// ErrAuditPersistence reports that a security event could not be recorded
+// durably. Callers must not hand out or revoke a session when it is returned.
+var ErrAuditPersistence = errors.New("audit persistence failed")
 
 const MinimumPasswordLength = 7
 
@@ -176,11 +181,15 @@ func (m *Manager) Login(email, password string) (Session, error) {
 			return Session{}, err
 		}
 		user := Account{ID: account.ID, Email: account.Email, Role: account.Role}
+		// Persist the login audit before handing out a session: a failed
+		// durable audit must not leave a usable session behind.
+		if err := m.persistAudit(account.Email, "login", "login"); err != nil {
+			return Session{}, err
+		}
 		m.mu.Lock()
 		m.failures = nil
 		m.sessions[sessionToken] = sessionRecord{CSRF: csrf, Expires: time.Now().Add(24 * time.Hour), User: user}
 		m.mu.Unlock()
-		m.recordAudit(account.Email, "login", "login")
 		return Session{Token: sessionToken, CSRF: csrf, User: user}, nil
 	}
 	m.mu.Lock()
@@ -200,10 +209,24 @@ func (m *Manager) Authenticate(token string) (Session, bool) {
 	return Session{Token: token, CSRF: record.CSRF, User: record.User}, true
 }
 
-func (m *Manager) Logout(token string) {
+// Logout revokes a session. Sessions are ephemeral (in-memory) state, so the
+// logout audit row cannot share a state save with the deletion; instead the
+// attributed audit entry is persisted first, and the session is removed only
+// after that durable write succeeds. A failed audit leaves the session valid
+// and returns an error, and the caller must not report a successful logout.
+func (m *Manager) Logout(token string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.sessions[token]
+	if !ok {
+		// Nothing to revoke; a stale token is an idempotent no-op.
+		return nil
+	}
+	if err := m.persistAudit(record.User.Email, "logout", "logout"); err != nil {
+		return err
+	}
 	delete(m.sessions, token)
-	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) ClearSessions() {
@@ -213,20 +236,32 @@ func (m *Manager) ClearSessions() {
 	m.mu.Unlock()
 }
 
-// RevokeUserSessions removes every session for a local account and records the
-// change in the same state save.
-func (m *Manager) RevokeUserSessions(actor, accountID string) int {
+// RevokeUserSessions removes every session for a local account. Sessions are
+// ephemeral (in-memory) state, so the revocation audit row cannot share a
+// state save with the deletions; the attributed audit entry is persisted
+// first, and the targeted sessions are removed only after that durable write
+// succeeds. A failed audit leaves every targeted session valid and returns
+// the error, and the caller must not report successful revocation.
+//
+// Lock ordering: the session lock is held while the audit state save runs
+// (session → state). No code path takes the state lock and then the session
+// lock, so this single-direction ordering cannot deadlock.
+func (m *Manager) RevokeUserSessions(actor, accountID string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	removed := 0
+	targets := []string{}
 	for token, record := range m.sessions {
 		if record.User.ID == accountID {
-			delete(m.sessions, token)
-			removed++
+			targets = append(targets, token)
 		}
 	}
-	m.recordAudit(actor, "account_revoke_sessions", "account="+accountID)
-	return removed
+	if err := m.persistAudit(actor, "account_revoke_sessions", "account="+accountID); err != nil {
+		return 0, err
+	}
+	for _, token := range targets {
+		delete(m.sessions, token)
+	}
+	return len(targets), nil
 }
 
 // ChangePassword rotates an account's own password and revokes every other
@@ -322,11 +357,17 @@ func (m *Manager) ListAudit() []state.AuditEntry {
 	return m.state.Snapshot().LocalAuth.Audit
 }
 
-func (m *Manager) recordAudit(actor, action, detail string) {
-	_ = m.state.Update(func(current *state.State) error {
+// persistAudit durably records a security event and propagates the
+// persistence result. Security-sensitive callers must not ignore it; the
+// error is wrapped so they can distinguish a storage failure.
+func (m *Manager) persistAudit(actor, action, detail string) error {
+	if err := m.state.Update(func(current *state.State) error {
 		current.LocalAuth.AppendAudit(actor, action, detail)
 		return nil
-	})
+	}); err != nil {
+		return fmt.Errorf("%w: %v", ErrAuditPersistence, err)
+	}
+	return nil
 }
 
 func WithSession(ctx context.Context, session Session) context.Context {

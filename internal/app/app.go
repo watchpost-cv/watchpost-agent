@@ -121,6 +121,10 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := a.auth.Login(input.Email, input.Password)
 	if err != nil {
+		if errors.Is(err, auth.ErrAuditPersistence) {
+			writeJSON(w, 500, map[string]string{"error": "could not record login audit; no session created"})
+			return
+		}
 		writeJSON(w, 401, map[string]string{"error": "invalid credentials"})
 		return
 	}
@@ -129,10 +133,21 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie("watchpost_agent_session"); err == nil {
-		a.auth.Logout(cookie.Value)
+	cookie, err := r.Cookie("watchpost_agent_session")
+	clearCookie := func() {
+		http.SetCookie(w, &http.Cookie{Name: "watchpost_agent_session", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	}
-	http.SetCookie(w, &http.Cookie{Name: "watchpost_agent_session", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	if err == nil && cookie.Value != "" {
+		if err := a.auth.Logout(cookie.Value); err != nil {
+			// The durable logout audit could not be written, so the
+			// server-side session remains valid. Clear the client cookie
+			// anyway (the safe browser behaviour) but report the failure.
+			clearCookie()
+			writeJSON(w, 500, map[string]string{"error": "could not record logout audit; session not revoked"})
+			return
+		}
+	}
+	clearCookie()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -475,7 +490,11 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, account)
 }
 func (a *App) revokeAccountSessions(w http.ResponseWriter, r *http.Request) {
-	removed := a.auth.RevokeUserSessions(actorEmail(r), r.PathValue("id"))
+	removed, err := a.auth.RevokeUserSessions(actorEmail(r), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not record revocation audit; sessions unchanged"})
+		return
+	}
 	writeJSON(w, 200, map[string]int{"revoked": removed})
 }
 func (a *App) audit(w http.ResponseWriter, r *http.Request) {
