@@ -219,8 +219,14 @@ func snapshot(config state.CollectorConfig) ([]metric, error) {
 		if err != nil {
 			return nil, err
 		}
-		value, _ := strconv.ParseFloat(strings.Fields(string(data))[0], 64)
-		result = append(result, metric{"load.one", "load", value, map[string]string{}})
+		fields := strings.Fields(string(data))
+		if len(fields) < 3 {
+			return nil, errors.New("invalid load telemetry")
+		}
+		for index, signal := range []string{"load.1", "load.5", "load.15"} {
+			value, _ := strconv.ParseFloat(fields[index], 64)
+			result = append(result, metric{signal, "load", value, map[string]string{}})
+		}
 	}
 	if config.Uptime {
 		data, err := os.ReadFile("/proc/uptime")
@@ -241,6 +247,9 @@ func snapshot(config state.CollectorConfig) ([]metric, error) {
 		}
 		result = append(result, metric{signal, "percent", value, map[string]string{"path": path}})
 	}
+	// Agent health: a definitive good-quality fact that telemetry ran.
+	up := 1.0
+	result = append(result, metric{"collector.up", "boolean", up, map[string]string{}})
 	return result, nil
 }
 func cpuPercent() (float64, error) {
