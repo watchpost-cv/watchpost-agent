@@ -101,7 +101,7 @@ func deliveryLoop(ctx context.Context, store *state.Store) {
 		case <-timer.C:
 			current := store.Snapshot()
 			if current.Connection.RevocationPending && current.Connection.Credential != "" {
-				_ = pairing.New(store, version).RetryPendingRevocation(ctx)
+				_ = pairing.New(store, version).RetryPendingRevocation(ctx, "cli")
 				continue
 			}
 			_ = telemetry.Send(ctx, store)
@@ -168,14 +168,14 @@ func localCommand(action string, arguments []string) error {
 		if *serverURL == "" {
 			return fmt.Errorf("--server is required")
 		}
-		result, err := pairing.New(store, version).Request(context.Background(), *serverURL)
+		result, err := pairing.New(store, version).Request(context.Background(), *serverURL, "cli")
 		if err != nil {
 			return err
 		}
 		fmt.Printf("Pairing requested.\nMatch this phrase in Watchpost: %s\nExpires: %s\n", result.Phrase, result.ExpiresAt.Format(time.RFC3339))
 		return nil
 	case "pair-status":
-		result, err := pairing.New(store, version).Poll(context.Background())
+		result, err := pairing.New(store, version).Poll(context.Background(), "cli")
 		if err != nil {
 			return err
 		}
@@ -205,13 +205,13 @@ func localCommand(action string, arguments []string) error {
 		fmt.Printf("Collectors updated: every %d seconds.\n", config.IntervalSeconds)
 		return nil
 	case "unpair":
-		if err := pairing.New(store, version).Unpair(context.Background()); err != nil {
+		if err := pairing.New(store, version).Unpair(context.Background(), "cli"); err != nil {
 			return err
 		}
 		fmt.Println("Agent unpaired. The connection was revoked at Watchpost; local configuration and administrator retained.")
 		return nil
 	case "rotate":
-		if err := pairing.New(store, version).Rotate(context.Background()); err != nil {
+		if err := pairing.New(store, version).Rotate(context.Background(), "cli"); err != nil {
 			return err
 		}
 		fmt.Println("Post-scoped credential rotated atomically.")

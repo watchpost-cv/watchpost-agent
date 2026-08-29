@@ -369,21 +369,19 @@ func (a *App) requestPairing(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	result, err := a.pairing.Request(r.Context(), input.WatchpostURL)
+	result, err := a.pairing.Request(r.Context(), input.WatchpostURL, actorEmail(r))
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	a.recordAudit(r, "pairing_request", input.WatchpostURL)
 	writeJSON(w, 201, result)
 }
 func (a *App) pollPairing(w http.ResponseWriter, r *http.Request) {
-	result, err := a.pairing.Poll(r.Context())
+	result, err := a.pairing.Poll(r.Context(), actorEmail(r))
 	if err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
-	a.recordAudit(r, "pairing_poll", result.State)
 	writeJSON(w, 200, result)
 }
 func (a *App) collectorConfig(w http.ResponseWriter, r *http.Request) {
@@ -399,30 +397,29 @@ func (a *App) collectorConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
+	// The configuration change and its audit row commit in one state save.
 	if err := a.state.Update(func(value *state.State) error {
 		value.Collectors = input
+		value.LocalAuth.AppendAudit(actorEmail(r), "collector_config", "interval seconds="+strconv.Itoa(input.IntervalSeconds))
 		return nil
 	}); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "collector configuration could not be saved"})
 		return
 	}
-	a.recordAudit(r, "collector_config", "interval seconds="+strconv.Itoa(input.IntervalSeconds))
 	writeJSON(w, 200, input)
 }
 func (a *App) unpair(w http.ResponseWriter, r *http.Request) {
-	if err := a.pairing.Unpair(r.Context()); err != nil {
+	if err := a.pairing.Unpair(r.Context(), actorEmail(r)); err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
-	a.recordAudit(r, "unpair", "revoked at Watchpost")
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) rotate(w http.ResponseWriter, r *http.Request) {
-	if err := a.pairing.Rotate(r.Context()); err != nil {
+	if err := a.pairing.Rotate(r.Context(), actorEmail(r)); err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
-	a.recordAudit(r, "rotate", "credential rotated")
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) reset(w http.ResponseWriter, r *http.Request) {
@@ -458,7 +455,6 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
-	a.recordAudit(r, "password_change", "password rotated")
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) accounts(w http.ResponseWriter, r *http.Request) {
@@ -471,32 +467,28 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	account, err := a.auth.CreateAccount(input.Email, input.Password, input.Role)
+	account, err := a.auth.CreateAccount(actorEmail(r), input.Email, input.Password, input.Role)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	a.recordAudit(r, "account_create", input.Email+" role="+input.Role)
 	writeJSON(w, 201, account)
 }
 func (a *App) revokeAccountSessions(w http.ResponseWriter, r *http.Request) {
-	removed := a.auth.RevokeUserSessions(r.PathValue("id"))
-	a.recordAudit(r, "account_revoke_sessions", "account="+r.PathValue("id"))
+	removed := a.auth.RevokeUserSessions(actorEmail(r), r.PathValue("id"))
 	writeJSON(w, 200, map[string]int{"revoked": removed})
 }
 func (a *App) audit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"audit": a.auth.ListAudit()})
 }
-func (a *App) recordAudit(r *http.Request, action, detail string) {
+
+// actorEmail returns the authenticated session's email for attribution.
+func actorEmail(r *http.Request) string {
 	session, ok := auth.FromContext(r.Context())
-	actor := "unknown"
-	if ok {
-		actor = session.User.Email
+	if !ok {
+		return "unknown"
 	}
-	a.state.Update(func(current *state.State) error {
-		current.LocalAuth.AppendAudit(actor, action, detail)
-		return nil
-	})
+	return session.User.Email
 }
 
 var runtimeHostname = os.Hostname

@@ -36,7 +36,7 @@ func New(store *state.Store, version string) *Client {
 	return &Client{state: store, version: version, http: &http.Client{Timeout: 10 * time.Second}}
 }
 
-func (c *Client) Request(ctx context.Context, server string) (Status, error) {
+func (c *Client) Request(ctx context.Context, server, actor string) (Status, error) {
 	server = strings.TrimRight(server, "/")
 	if err := safeURL(server); err != nil {
 		return Status{}, err
@@ -74,6 +74,7 @@ func (c *Client) Request(ctx context.Context, server string) (Status, error) {
 	}
 	err = c.state.Update(func(value *state.State) error {
 		value.PendingPairing = state.PendingPairing{WatchpostURL: server, RequestID: result.ID, RequestSecret: secret, Phrase: result.Phrase, ExpiresAt: result.ExpiresAt}
+		value.LocalAuth.AppendAudit(actor, "pairing_request", server)
 		return nil
 	})
 	if err != nil {
@@ -82,7 +83,7 @@ func (c *Client) Request(ctx context.Context, server string) (Status, error) {
 	return Status{State: "pending", Phrase: result.Phrase, ExpiresAt: result.ExpiresAt}, nil
 }
 
-func (c *Client) Poll(ctx context.Context) (Status, error) {
+func (c *Client) Poll(ctx context.Context, actor string) (Status, error) {
 	current := c.state.Snapshot()
 	pending := current.PendingPairing
 	if pending.RequestID == "" || pending.RequestSecret == "" {
@@ -118,6 +119,7 @@ func (c *Client) Poll(ctx context.Context) (Status, error) {
 			value.Connection = state.Connection{WatchpostURL: pending.WatchpostURL, PostID: result.PostID, Credential: result.Credential}
 			value.PendingPairing = state.PendingPairing{}
 			value.NextSequence = 1
+			value.LocalAuth.AppendAudit(actor, "pairing_poll", "approved post="+result.PostID)
 			return nil
 		})
 		if err != nil {
@@ -130,22 +132,36 @@ func (c *Client) Poll(ctx context.Context) (Status, error) {
 	return Status{State: result.State, Phrase: pending.Phrase, ExpiresAt: pending.ExpiresAt, PostID: result.PostID}, nil
 }
 
+// clearConnectionAudited clears pairing authority and records the change in one
+// atomic state save.
+func (c *Client) clearConnectionAudited(actor, detail string) error {
+	return c.state.Update(func(value *state.State) error {
+		value.Connection = state.Connection{}
+		value.PendingPairing = state.PendingPairing{}
+		value.NextSequence = 1
+		value.Delivery = state.DeliveryState{}
+		value.LocalAuth.AppendAudit(actor, "unpair", detail)
+		return nil
+	})
+}
+
 // Unpair revokes the connection at Watchpost first, then clears local state.
 // When Watchpost is unreachable it records revocation-pending and retains the
 // credential so the revocation can be retried; authority is never silently
-// discarded locally.
-func (c *Client) Unpair(ctx context.Context) error {
+// discarded locally. The local change and its audit row commit in one save.
+func (c *Client) Unpair(ctx context.Context, actor string) error {
 	current := c.state.Snapshot()
 	if current.Connection.Credential == "" {
 		return errors.New("agent is not paired")
 	}
 	err := c.requestServerUnpair(ctx, current)
 	if err == nil {
-		return c.state.Unpair()
+		return c.clearConnectionAudited(actor, "revoked at Watchpost")
 	}
 	if err := c.state.Update(func(value *state.State) error {
 		value.Connection.RevocationPending = true
 		value.Delivery.LastError = "unpair pending: " + err.Error()
+		value.LocalAuth.AppendAudit(actor, "unpair_pending", "Watchpost unreachable; will retry")
 		return nil
 	}); err != nil {
 		return err
@@ -154,7 +170,7 @@ func (c *Client) Unpair(ctx context.Context) error {
 }
 
 // RetryPendingRevocation continues an unpair that could not reach Watchpost.
-func (c *Client) RetryPendingRevocation(ctx context.Context) error {
+func (c *Client) RetryPendingRevocation(ctx context.Context, actor string) error {
 	current := c.state.Snapshot()
 	if !current.Connection.RevocationPending || current.Connection.Credential == "" {
 		return nil
@@ -162,7 +178,7 @@ func (c *Client) RetryPendingRevocation(ctx context.Context) error {
 	if err := c.requestServerUnpair(ctx, current); err != nil {
 		return err
 	}
-	return c.state.Unpair()
+	return c.clearConnectionAudited(actor, "revoked at Watchpost (retried)")
 }
 
 func (c *Client) requestServerUnpair(ctx context.Context, current state.State) error {
@@ -184,7 +200,7 @@ func (c *Client) requestServerUnpair(ctx context.Context, current state.State) e
 	return fmt.Errorf("Watchpost rejected unpair (%d)", response.StatusCode)
 }
 
-func (c *Client) Rotate(ctx context.Context) error {
+func (c *Client) Rotate(ctx context.Context, actor string) error {
 	current := c.state.Snapshot()
 	if current.Connection.Credential == "" {
 		return errors.New("agent is not paired")
@@ -214,6 +230,7 @@ func (c *Client) Rotate(ctx context.Context) error {
 	return c.state.Update(func(value *state.State) error {
 		value.Connection.PreviousCredential = value.Connection.Credential
 		value.Connection.Credential = result.Credential
+		value.LocalAuth.AppendAudit(actor, "rotate", "credential rotation requested")
 		return nil
 	})
 }

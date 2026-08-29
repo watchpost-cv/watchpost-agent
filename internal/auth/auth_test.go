@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -51,13 +53,13 @@ func TestRoleCapabilities(t *testing.T) {
 	if err != nil || admin.User.Role != "admin" {
 		t.Fatalf("admin login: %#v %v", admin, err)
 	}
-	if _, err := m.CreateAccount("tech@local", "1234567", "technician"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "tech@local", "1234567", "technician"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("view@local", "1234567", "viewer"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "view@local", "1234567", "viewer"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("bad@local", "1234567", "superuser"); err == nil {
+	if _, err := m.CreateAccount("admin@local", "bad@local", "1234567", "superuser"); err == nil {
 		t.Fatal("invalid role accepted")
 	}
 	items := m.ListAccounts()
@@ -86,7 +88,7 @@ func TestSessionRevocationAndPasswordChange(t *testing.T) {
 	if _, ok := m.Authenticate(session1.Token); !ok {
 		t.Fatal("current session revoked")
 	}
-	if removed := m.RevokeUserSessions(session1.User.ID); removed < 1 {
+	if removed := m.RevokeUserSessions("admin@local", session1.User.ID); removed < 1 {
 		t.Fatalf("revoke sessions removed=%d", removed)
 	}
 	if _, ok := m.Authenticate(session1.Token); ok {
@@ -100,10 +102,10 @@ func TestSharedPasswordResolvesEachEmailToOwnIdentity(t *testing.T) {
 	if err := m.Setup("admin@local", "shared-password-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("tech@local", "shared-password-1", "technician"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "tech@local", "shared-password-1", "technician"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("view@local", "shared-password-1", "viewer"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "view@local", "shared-password-1", "viewer"); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct{ email, role string }{
@@ -142,13 +144,13 @@ func TestDuplicateEmailRejectedCaseInsensitively(t *testing.T) {
 	if err := m.Setup("Admin@Local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@LOCAL", "another-password-1", "viewer"); err == nil {
+	if _, err := m.CreateAccount("admin@local", "admin@LOCAL", "another-password-1", "viewer"); err == nil {
 		t.Fatal("duplicate normalized email accepted")
 	}
-	if _, err := m.CreateAccount("TECH@local", "another-password-1", "technician"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "TECH@local", "another-password-1", "technician"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("tech@LOCAL", "another-password-1", "viewer"); err == nil {
+	if _, err := m.CreateAccount("admin@local", "tech@LOCAL", "another-password-1", "viewer"); err == nil {
 		t.Fatal("duplicate normalized technician email accepted")
 	}
 }
@@ -270,5 +272,132 @@ func TestPasswordHashesUseVersionedPBKDF2(t *testing.T) {
 	// A legacy custom iterated-SHA-256 hash must fail closed, forcing re-setup.
 	if verifyPassword("correct-horse-battery", account.Salt, "deadbeef") {
 		t.Fatal("legacy unversioned hash verified")
+	}
+}
+
+func auditEntries(store *state.Store, action string) []state.AuditEntry {
+	entries := []state.AuditEntry{}
+	for _, entry := range store.Snapshot().LocalAuth.Audit {
+		if entry.Action == action {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+func TestAccountCreationEmitsSingleAuditWithRealActor(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateAccount("admin@local", "tech@local", "1234567", "technician"); err != nil {
+		t.Fatal(err)
+	}
+	entries := auditEntries(store, "account_create")
+	if len(entries) != 1 {
+		t.Fatalf("account_create rows=%d want exactly 1", len(entries))
+	}
+	if entries[0].Actor != "admin@local" {
+		t.Fatalf("account_create actor=%q want admin@local", entries[0].Actor)
+	}
+	if entries[0].Detail != "tech@local role=technician" {
+		t.Fatalf("account_create detail=%q", entries[0].Detail)
+	}
+}
+
+func TestChangePasswordEmitsSingleAuditWithSelfActor(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	account, err := m.CreateAccount("admin@local", "tech@local", "1234567", "technician")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ChangePassword(account.ID, "1234567", "new-password-1", "keep-token"); err != nil {
+		t.Fatal(err)
+	}
+	entries := auditEntries(store, "password_change")
+	if len(entries) != 1 {
+		t.Fatalf("password_change rows=%d want exactly 1", len(entries))
+	}
+	if entries[0].Actor != "tech@local" {
+		t.Fatalf("password_change actor=%q want tech@local", entries[0].Actor)
+	}
+}
+
+func TestFailedAuditSaveRollsBackAccountCreation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	beforeAccounts := len(store.Snapshot().LocalAuth.Accounts)
+	beforeAudit := len(store.Snapshot().LocalAuth.Audit)
+	// Replace the state file with a directory so the next save fails.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateAccount("admin@local", "op@local", "1234567", "viewer"); err == nil {
+		t.Fatal("account creation with broken save succeeded")
+	}
+	snapshot := store.Snapshot()
+	if len(snapshot.LocalAuth.Accounts) != beforeAccounts {
+		t.Fatalf("account list changed on failed save: %d", len(snapshot.LocalAuth.Accounts))
+	}
+	if len(snapshot.LocalAuth.Audit) != beforeAudit {
+		t.Fatalf("audit changed on failed save: %d", len(snapshot.LocalAuth.Audit))
+	}
+}
+
+func TestVerifyPasswordRejectsMalformedAndBoundedEncodings(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	account := store.Snapshot().LocalAuth.Accounts[0]
+	salt := account.Salt
+	if !verifyPassword("correct-horse-battery", salt, account.PasswordHash) {
+		t.Fatal("valid hash rejected")
+	}
+	good := strings.SplitN(account.PasswordHash, "$", 3)
+	// Empty and truncated payloads.
+	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$") {
+		t.Fatal("empty derived key accepted")
+	}
+	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$aa") {
+		t.Fatal("truncated derived key accepted")
+	}
+	// Oversized derived key.
+	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$"+strings.Repeat("aa", 32)) {
+		t.Fatal("oversized derived key accepted")
+	}
+	// Out-of-bound work factors.
+	for _, iterations := range []int{0, 1, 9999, 10000001, 1000000000} {
+		bad := "pbkdf2$" + strconv.Itoa(iterations) + "$" + good[2]
+		if verifyPassword("correct-horse-battery", salt, bad) {
+			t.Fatalf("out-of-bound work factor %d accepted", iterations)
+		}
+	}
+	// Wrong algorithm prefix and non-hex payload.
+	if verifyPassword("correct-horse-battery", salt, "sha256$210000$"+good[2]) {
+		t.Fatal("wrong algorithm accepted")
+	}
+	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$not-hex!") {
+		t.Fatal("non-hex derived key accepted")
+	}
+	// A wrong password with an otherwise valid hash must still fail.
+	if verifyPassword("wrong-password", salt, account.PasswordHash) {
+		t.Fatal("wrong password verified")
 	}
 }

@@ -87,10 +87,10 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	adminCookie, adminCSRF := loginForRole(t, handler, "admin@local", "admin-pass-1")
 	// Create roles through the auth manager directly, then log in through the API.
 	manager := auth.New(store)
-	if _, err := manager.CreateAccount("tech@local", "tech-pass-1", "technician"); err != nil {
+	if _, err := manager.CreateAccount("admin@local", "tech@local", "tech-pass-1", "technician"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.CreateAccount("view@local", "view-pass-1", "viewer"); err != nil {
+	if _, err := manager.CreateAccount("admin@local", "view@local", "view-pass-1", "viewer"); err != nil {
 		t.Fatal(err)
 	}
 	techCookie, techCSRF := loginForRole(t, handler, "tech@local", "tech-pass-1")

@@ -29,7 +29,7 @@ func TestUnpairClearsStateAfterServerRevocation(t *testing.T) {
 		return nil
 	})
 	client := New(store, "test")
-	if err := client.Unpair(context.Background()); err != nil {
+	if err := client.Unpair(context.Background(), "cli"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(sawAuth, "Bearer active-credential") {
@@ -48,7 +48,7 @@ func TestUnpairMarksRevocationPendingWhenServerUnreachable(t *testing.T) {
 		return nil
 	})
 	client := New(store, "test")
-	err := client.Unpair(context.Background())
+	err := client.Unpair(context.Background(), "cli")
 	if err == nil {
 		t.Fatal("unpair succeeded against an unreachable server")
 	}
@@ -70,7 +70,7 @@ func TestRetryPendingRevocationCompletes(t *testing.T) {
 		return nil
 	})
 	client := New(store, "test")
-	if err := client.RetryPendingRevocation(context.Background()); err != nil {
+	if err := client.RetryPendingRevocation(context.Background(), "cli"); err != nil {
 		t.Fatal(err)
 	}
 	current := store.Snapshot()

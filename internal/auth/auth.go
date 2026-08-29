@@ -24,6 +24,16 @@ const MinimumPasswordLength = 7
 // account password hashes, matching the central server's established KDF.
 const passwordIterations = 210000
 
+// Derived-key and work-factor bounds for verifyPassword. A stored hash must
+// use the expected algorithm, an acceptable bounded work factor, and exactly
+// the expected derived-key length; empty, truncated, oversized or excessively
+// expensive encodings are rejected before PBKDF2 runs.
+const (
+	minVerifyIterations = 10000
+	maxVerifyIterations = 10000000
+	keyLength           = 32
+)
+
 type contextKey struct{}
 
 // Session carries the authenticated local account.
@@ -203,8 +213,9 @@ func (m *Manager) ClearSessions() {
 	m.mu.Unlock()
 }
 
-// RevokeUserSessions removes every session for a local account.
-func (m *Manager) RevokeUserSessions(accountID string) int {
+// RevokeUserSessions removes every session for a local account and records the
+// change in the same state save.
+func (m *Manager) RevokeUserSessions(actor, accountID string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	removed := 0
@@ -214,6 +225,7 @@ func (m *Manager) RevokeUserSessions(accountID string) int {
 			removed++
 		}
 	}
+	m.recordAudit(actor, "account_revoke_sessions", "account="+accountID)
 	return removed
 }
 
@@ -263,8 +275,9 @@ func (m *Manager) ChangePassword(accountID, currentPassword, newPassword, keepTo
 }
 
 // CreateAccount adds a technician or viewer account (administrator only).
-// Identities are normalized and compared case-insensitively.
-func (m *Manager) CreateAccount(email, password, role string) (Account, error) {
+// Identities are normalized and compared case-insensitively. The authenticated
+// administrator's email is recorded as the actor in the same state save.
+func (m *Manager) CreateAccount(actor, email, password, role string) (Account, error) {
 	email = NormalizeEmail(email)
 	if email == "" || !strings.Contains(email, "@") || len(password) < MinimumPasswordLength || (role != "admin" && role != "technician" && role != "viewer") {
 		return Account{}, errors.New("valid email, password of at least 7 characters, and role required")
@@ -290,7 +303,7 @@ func (m *Manager) CreateAccount(email, password, role string) (Account, error) {
 		}
 		current.LocalAuth.Accounts = append(current.LocalAuth.Accounts, state.Account{ID: id, Email: email, Salt: salt, PasswordHash: hash, Role: role, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 		created = Account{ID: id, Email: email, Role: role}
-		current.LocalAuth.AppendAudit("admin", "account_create", email+" role="+role)
+		current.LocalAuth.AppendAudit(actor, "account_create", email+" role="+role)
 		return nil
 	})
 	return created, err
@@ -337,18 +350,20 @@ func hashPassword(password, salt string) (string, error) {
 
 // verifyPassword checks a versioned hash. Legacy unversioned hashes from the
 // previous custom iterated-SHA-256 construction cannot be verified and fail
-// closed; those accounts require re-setup after upgrade.
+// closed; those accounts require re-setup after upgrade. Malformed encodings,
+// out-of-bound work factors and unexpected derived-key lengths are rejected
+// before any PBKDF2 work is performed.
 func verifyPassword(password, salt, encoded string) bool {
 	parts := strings.SplitN(encoded, "$", 3)
 	if len(parts) != 3 || parts[0] != "pbkdf2" {
 		return false
 	}
 	iterations, err := strconv.Atoi(parts[1])
-	if err != nil || iterations < 1 {
+	if err != nil || iterations < minVerifyIterations || iterations > maxVerifyIterations {
 		return false
 	}
 	expected, err := hex.DecodeString(parts[2])
-	if err != nil {
+	if err != nil || len(expected) != keyLength {
 		return false
 	}
 	key, err := pbkdf2.Key[hash.Hash](sha256.New, password, []byte(salt), iterations, len(expected))
