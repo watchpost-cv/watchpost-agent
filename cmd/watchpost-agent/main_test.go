@@ -80,6 +80,29 @@ func TestAppOptionsSetupTokenRequired(t *testing.T) {
 	}
 }
 
+func TestAppOptionsDocumentedProxyConfigRequiresToken(t *testing.T) {
+	// The documented loopback-behind-proxy deployment keeps the listener on
+	// loopback and supplies a protected setup-token file; the token gate must
+	// be active even though WATCHPOST_AGENT_EXPOSE is not set (EXPOSE only
+	// permits a non-loopback bind and does not enable the gate on loopback).
+	t.Setenv("WATCHPOST_AGENT_EXPOSE", "")
+	t.Setenv("WATCHPOST_AGENT_SECURE_COOKIES", "1")
+	t.Setenv("WATCHPOST_AGENT_TRUSTED_PROXIES", "127.0.0.0/8")
+	t.Setenv("WATCHPOST_AGENT_ALLOW_CIDRS", "192.0.2.0/24")
+	t.Setenv("WATCHPOST_AGENT_SETUP_TOKEN", "")
+	t.Setenv("WATCHPOST_AGENT_SETUP_TOKEN_FILE", "/run/watchpost-agent/setup-token")
+	options, err := appOptions("127.0.0.1:8090")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.SetupTokenRequired {
+		t.Fatal("documented loopback-behind-proxy config must require a setup token")
+	}
+	if !options.SecureCookies || len(options.TrustedProxies) != 1 || len(options.AllowCIDRs) != 1 {
+		t.Fatalf("documented security options not applied: %#v", options)
+	}
+}
+
 func TestProvisionSetupTokenStoresOnlyHash(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "agent.json"))
 	if err != nil {
