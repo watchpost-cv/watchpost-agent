@@ -69,11 +69,15 @@ token file):
 ./watchpost-agent service install --env-file /absolute/protected/agent.env
 ```
 
-The environment file must be an absolute, regular, owner-only (0600),
-non-symlink file owned by the invoking user; it is referenced by the unit's
-`EnvironmentFile=` and its path is recorded in the authenticated managed
-metadata. Secret values are never copied into the unit or printed. Changing it
-takes effect on `service restart`.
+The environment file must be an absolute, regular, non-symlink file with
+exactly `0600` permissions, owned by the invoking user; it is referenced by the
+unit's `EnvironmentFile=` and its path is recorded in the integrity-checked
+managed metadata. Secret values are never copied into the unit or printed. The
+recorded environment file is revalidated before `service start`, `service
+restart` and `service status`; `service stop`, `service logs` and `service
+uninstall` remain available even if it is missing. Changing it takes effect on
+`service restart`. Install creates the agent data directory with owner-only
+permissions and refuses symlink, non-directory or group/world-writable paths.
 
 `service upgrade` (or `upgrade`) after replacing the downloaded executable
 atomically replaces the stable installed binary and restarts the service

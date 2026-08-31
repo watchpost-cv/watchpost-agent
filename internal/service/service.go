@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -290,7 +289,7 @@ func renderUnitBody(paths Paths, listen, envfile string) string {
 	b.WriteString("PrivateTmp=true\n")
 	b.WriteString("ProtectSystem=strict\n")
 	b.WriteString("ProtectHome=read-only\n")
-	b.WriteString("ReadWritePaths=" + paths.DataDir + "\n")
+	b.WriteString("ReadWritePaths=" + systemdQuote(paths.DataDir) + "\n")
 	b.WriteString("Environment=HOME=%h\n")
 	if envfile != "" {
 		b.WriteString("EnvironmentFile=" + systemdQuote(envfile) + "\n")
@@ -321,13 +320,13 @@ type unitMeta struct {
 	health  string
 }
 
-// Meta is the exported view of a managed unit's authenticated metadata.
+// Meta is the exported view of a managed unit's integrity-checked metadata.
 type Meta struct {
 	Listen  string
 	EnvFile string
 }
 
-// ExistingMeta returns the installed managed unit's authenticated metadata, or
+// ExistingMeta returns the installed managed unit's integrity-checked metadata, or
 // ok=false when no unit is installed. A foreign or modified unit is an error so
 // install/upgrade never silently diverge from it.
 func (m Manager) ExistingMeta(paths Paths) (Meta, bool, error) {
@@ -355,9 +354,9 @@ func PreserveInstallValues(existing Meta, listenSet bool, listen string, envfile
 }
 
 // validateEnvFile validates an EnvironmentFile path for the service unit:
-// absolute, a regular non-symlink file, owner-only permissions, owned by the
-// invoking user, and free of systemd specifier and control characters. Secret
-// values are never read or embedded.
+// absolute, a regular non-symlink file with exactly owner-only 0600
+// permissions, owned by the invoking user, and free of systemd specifier and
+// control characters. Secret values are never read or embedded.
 func validateEnvFile(path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("environment file %q must be an absolute path", path)
@@ -378,14 +377,58 @@ func validateEnvFile(path string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("environment file %q must be a regular file", path)
 	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("environment file %q must have exactly 0600 permissions (owner read/write only)", path)
+	}
+	if err := fileOwnerOK(info); err != nil {
+		return fmt.Errorf("environment file %q: %w", path, err)
+	}
+	return nil
+}
+
+// prepareDataDir creates the service data directory with owner-only permissions
+// and refuses symlinks, non-directories, unsafe permissions or wrong ownership.
+func prepareDataDir(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return fmt.Errorf("cannot create data directory %q: %w", path, err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("data directory %q: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("data directory %q must not be a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("data directory %q is not a directory", path)
+	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("environment file %q must not be group- or world-writable", path)
+		return fmt.Errorf("data directory %q must not be group- or world-writable", path)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("environment file %q must be owner-only (0600)", path)
+	if err := fileOwnerOK(info); err != nil {
+		return fmt.Errorf("data directory %q: %w", path, err)
 	}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Uid) != os.Getuid() {
-		return fmt.Errorf("environment file %q must be owned by the invoking user", path)
+	return nil
+}
+
+// validateReadWritePath validates a data directory for the ReadWritePaths=
+// directive: absolute, free of control characters, systemd specifiers, quotes
+// and backslashes, and not starting with a special path-list prefix.
+func validateReadWritePath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("data directory %q must be an absolute path", path)
+	}
+	if err := validateNoControl(path, "data directory"); err != nil {
+		return err
+	}
+	if strings.ContainsAny(path, "%") {
+		return fmt.Errorf("data directory %q must not contain systemd specifiers (%% )", path)
+	}
+	if strings.ContainsAny(path, `"\`) {
+		return fmt.Errorf("data directory %q cannot be safely quoted in ReadWritePaths", path)
+	}
+	if len(path) > 0 && strings.ContainsRune("-+!~", rune(path[0])) {
+		return fmt.Errorf("data directory %q starts with a ReadWritePaths special prefix; use a plain absolute path", path)
 	}
 	return nil
 }
@@ -505,31 +548,97 @@ func writeManagedUnit(path, content string) error {
 	return nil
 }
 
-func atomicCopy(source, destination string, mode os.FileMode) error {
+func readFileIfPresent(path string) ([]byte, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+// stageCopy copies source to a staging file beside destination (no publish),
+// so a copy failure can never corrupt the installed binary.
+func stageCopy(source, dest string, mode os.FileMode) (string, error) {
 	input, err := os.Open(source)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer input.Close()
-	if err = os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(dir, ".watchpost-agent-stage-*")
+	if err != nil {
+		return "", err
+	}
+	name := tmp.Name()
+	if _, err := io.Copy(tmp, input); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(destination), ".watchpost-agent-install-*")
+	tmp, err := os.CreateTemp(dir, ".watchpost-agent-restore-*")
 	if err != nil {
 		return err
 	}
-	name := temporary.Name()
+	name := tmp.Name()
 	defer os.Remove(name)
-	if _, err = io.Copy(temporary, input); err == nil {
-		err = temporary.Chmod(mode)
-	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	return os.Rename(name, destination)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+// rollbackInstall restores the prior unit and binary after a failed
+// install/upgrade, removing them for a fresh install. It returns an
+// explanatory string when rollback itself fails, and runs a best-effort reload.
+func (m Manager) rollbackInstall(paths Paths, oldUnit, oldBinary []byte, hadBinary bool) string {
+	var errs []string
+	if oldUnit != nil {
+		if err := writeFileAtomic(paths.Unit, oldUnit, 0644); err != nil {
+			errs = append(errs, fmt.Sprintf("restore unit: %v", err))
+		}
+	} else if err := os.Remove(paths.Unit); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Sprintf("remove new unit: %v", err))
+	}
+	if hadBinary {
+		if err := writeFileAtomic(paths.Binary, oldBinary, 0755); err != nil {
+			errs = append(errs, fmt.Sprintf("restore binary: %v", err))
+		}
+	} else if err := os.Remove(paths.Binary); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Sprintf("remove new binary: %v", err))
+	}
+	if len(errs) > 0 {
+		return "; rollback incomplete: " + strings.Join(errs, "; ")
+	}
+	_ = m.systemctlSuccess(paths, "daemon-reload")
+	return ""
 }
 
 func syncDir(dir string) {
@@ -618,10 +727,12 @@ func healthCheck(url string) error {
 	return nil
 }
 
-// Install copies the agent binary to a stable path, writes the managed unit,
-// and reloads, enables and restarts the service. The unit is written before the
-// binary so a failed copy never leaves the unit and binary at mismatched
-// configuration. Upgrade is the same call.
+// Install publishes a new unit and binary as a failure-atomic transaction:
+// inputs are validated, the replacement binary is staged first (no published
+// change), then the unit and binary are published, then the lifecycle runs.
+// Any copy, reload, enable or restart failure restores the prior unit and
+// binary (or removes them for a fresh install), so the installed state is
+// never a mix of old and new. Upgrade is the same call.
 func (m Manager) Install(source string, paths Paths, listen, envfile string) error {
 	for _, v := range []struct{ val, name string }{
 		{listen, "listen"}, {paths.DataDir, "data-dir"},
@@ -630,27 +741,57 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 			return err
 		}
 	}
+	if err := validateReadWritePath(paths.DataDir); err != nil {
+		return err
+	}
+	if err := prepareDataDir(paths.DataDir); err != nil {
+		return err
+	}
 	if envfile != "" {
 		if err := validateEnvFile(envfile); err != nil {
 			return err
 		}
 	}
-	if err := os.MkdirAll(paths.DataDir, 0700); err != nil {
+	// A repeat install/upgrade must not overwrite a foreign or modified unit.
+	oldUnit, hasUnit := readFileIfPresent(paths.Unit)
+	if hasUnit {
+		if _, err := readManagedUnit(paths.Unit); err != nil {
+			return fmt.Errorf("refusing to overwrite the existing unit: %w", err)
+		}
+	}
+	oldBinary, hasBinary := readFileIfPresent(paths.Binary)
+	// Stage the replacement binary before any published change.
+	stagedBin, err := stageCopy(source, paths.Binary, 0755)
+	if err != nil {
 		return err
 	}
+	defer func() { _ = os.Remove(stagedBin) }()
+	// Publish the unit, then the binary.
 	if err := writeManagedUnit(paths.Unit, Unit(paths, listen, envfile)); err != nil {
 		return err
 	}
-	if err := atomicCopy(source, paths.Binary, 0755); err != nil {
-		return err
+	if err := os.Rename(stagedBin, paths.Binary); err != nil {
+		if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasBinary); rb != "" {
+			return fmt.Errorf("cannot publish the binary: %w%s", err, rb)
+		}
+		return fmt.Errorf("cannot publish the binary: %w", err)
 	}
-	if err := m.systemctlSuccess(paths, "daemon-reload"); err != nil {
-		return err
+	for _, step := range []struct {
+		verb string
+		args []string
+	}{
+		{"reload", []string{"daemon-reload"}},
+		{"enable", []string{"enable", "watchpost-agent.service"}},
+		{"restart", []string{"restart", "watchpost-agent.service"}},
+	} {
+		if err := m.systemctlSuccess(paths, step.args...); err != nil {
+			if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasBinary); rb != "" {
+				return fmt.Errorf("%s failed: %w%s", step.verb, err, rb)
+			}
+			return fmt.Errorf("%s failed: %w", step.verb, err)
+		}
 	}
-	if err := m.systemctlSuccess(paths, "enable", "watchpost-agent.service"); err != nil {
-		return err
-	}
-	return m.systemctlSuccess(paths, "restart", "watchpost-agent.service")
+	return nil
 }
 
 // Upgrade reinstalls the current binary, preserving installed configuration.
@@ -672,12 +813,35 @@ func (m Manager) action(paths Paths, verb string) error {
 	if err := m.requireManaged(paths, verb); err != nil {
 		return err
 	}
+	if verb == "start" || verb == "restart" {
+		if err := m.revalidateEnv(paths); err != nil {
+			return fmt.Errorf("refusing to %s the service: %w", verb, err)
+		}
+	}
 	out, code, err := m.systemctl(paths, verb, "watchpost-agent.service")
 	if err != nil {
 		return fmt.Errorf("cannot run systemctl %s: %w", verb, err)
 	}
 	if code != 0 {
 		return fmt.Errorf("systemctl %s exited %d: %s", verb, code, bounded(strings.TrimSpace(out)))
+	}
+	return nil
+}
+
+// revalidateEnv checks the currently recorded environment file again so a file
+// deleted or made unsafe since install cannot silently change the service's
+// configuration. Stop, logs and uninstall intentionally skip this so operators
+// are never trapped with an unmanageable service.
+func (m Manager) revalidateEnv(paths Paths) error {
+	meta, err := readManagedUnit(paths.Unit)
+	if err != nil {
+		return err
+	}
+	if meta.envfile == "" {
+		return nil
+	}
+	if err := validateEnvFile(meta.envfile); err != nil {
+		return fmt.Errorf("the recorded environment file is no longer valid: %w", err)
 	}
 	return nil
 }
@@ -693,6 +857,9 @@ func (m Manager) Status(out io.Writer, paths Paths, version string) error {
 	enabled, err := m.queryState(paths, "is-enabled")
 	if err != nil {
 		return fmt.Errorf("cannot determine enablement state: %w", err)
+	}
+	if err := m.revalidateEnv(paths); err != nil {
+		return fmt.Errorf("cannot report status: %w", err)
 	}
 	active, err := m.queryState(paths, "is-active")
 	if err != nil {

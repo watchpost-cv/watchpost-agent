@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -140,7 +142,7 @@ func TestUnitAndIntegrity(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^# watchpost-agent-managed: v1 sha256=[0-9a-f]{64}$`).MatchString(unit) {
 		t.Fatalf("missing valid integrity header\n%s", unit)
 	}
-	for _, want := range []string{`ExecStart="/usr/local/lib/watchpost-agent/watchpost-agent" "--listen" "127.0.0.1:8090" "--data-dir" "/var/lib/watchpost-agent"`, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/watchpost-agent`, `# watchpost-agent-listen: 127.0.0.1:8090`, `# watchpost-agent-health: /healthz`, `WantedBy=multi-user.target`} {
+	for _, want := range []string{`ExecStart="/usr/local/lib/watchpost-agent/watchpost-agent" "--listen" "127.0.0.1:8090" "--data-dir" "/var/lib/watchpost-agent"`, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ReadWritePaths="/var/lib/watchpost-agent"`, `# watchpost-agent-listen: 127.0.0.1:8090`, `# watchpost-agent-health: /healthz`, `WantedBy=multi-user.target`} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q\n%s", want, unit)
 		}
@@ -935,6 +937,196 @@ func metaFrom(t *testing.T, m Manager, paths Paths) Meta {
 		t.Fatalf("existing meta: ok=%v err=%v", ok, err)
 	}
 	return meta
+}
+
+func TestEnvFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	modes := []struct {
+		mode os.FileMode
+		ok   bool
+	}{
+		{0o000, false}, {0o200, false}, {0o400, false}, {0o600, true},
+		{0o640, false}, {0o660, false}, {0o666, false},
+	}
+	for _, tc := range modes {
+		env := filepath.Join(dir, fmt.Sprintf("env-%o", tc.mode))
+		if err := os.WriteFile(env, []byte("x\n"), tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateEnvFile(env); (err == nil) != tc.ok {
+			t.Fatalf("mode %04o: ok=%v err=%v", tc.mode, tc.ok, err)
+		}
+	}
+}
+
+func TestReadWritePath(t *testing.T) {
+	if err := validateReadWritePath("/home/nick/my data"); err != nil {
+		t.Fatalf("space path rejected: %v", err)
+	}
+	paths := Paths{Binary: "/usr/local/lib/watchpost-agent/watchpost-agent", DataDir: "/home/nick/my data"}
+	unit := Unit(paths, "127.0.0.1:8090", "")
+	if !strings.Contains(unit, `ReadWritePaths="/home/nick/my data"`) {
+		t.Fatalf("ReadWritePaths not quoted:\n%s", unit)
+	}
+	for _, bad := range []string{"/x/%h", "/x/\"/y", "/x/\\y", "-/weird", "+/weird", "!/weird", "~/weird", "relative"} {
+		if err := validateReadWritePath(bad); err == nil {
+			t.Fatalf("unsafe ReadWritePaths path accepted: %q", bad)
+		}
+	}
+}
+
+func TestFreshInstallPreparesDataDir(t *testing.T) {
+	manager, _, paths, source := testManager(t)
+	paths.DataDir = filepath.Join(t.TempDir(), "state", "data")
+	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
+		t.Fatalf("fresh install failed: %v", err)
+	}
+	info, err := os.Stat(paths.DataDir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("data dir not created: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("data dir mode=%v", info.Mode().Perm())
+	}
+	symTarget := filepath.Join(t.TempDir(), "target")
+	if err := os.MkdirAll(symTarget, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sym := filepath.Join(t.TempDir(), "symlink")
+	if err := os.Symlink(symTarget, sym); err != nil {
+		t.Fatal(err)
+	}
+	paths.DataDir = sym
+	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err == nil {
+		t.Fatal("symlink data dir accepted")
+	}
+}
+
+func TestEnvFileRevalidatedOnStartRestart(t *testing.T) {
+	manager, fr, paths, source := testManager(t)
+	dir := t.TempDir()
+	env := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(env, []byte("WATCHPOST_AGENT_SECURE_COOKIES=true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Install(source, paths, "127.0.0.1:8090", env); err != nil {
+		t.Fatal(err)
+	}
+	fr.handler = func(name string, args ...string) (string, int, error) {
+		if fr.contains(args, "is-active") || fr.contains(args, "is-enabled") {
+			return "active", 0, nil
+		}
+		return "", 0, nil
+	}
+	if err := manager.Restart(paths); err != nil {
+		t.Fatalf("restart with valid env file failed: %v", err)
+	}
+	if err := os.Remove(env); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restart(paths); err == nil {
+		t.Fatal("restart succeeded with a missing env file")
+	}
+	if err := manager.Start(paths); err == nil {
+		t.Fatal("start succeeded with a missing env file")
+	}
+	if err := manager.Status(os.Stderr, paths, "1.0"); err == nil {
+		t.Fatal("status succeeded with a missing env file")
+	}
+	if err := manager.Stop(paths); err != nil {
+		t.Fatalf("stop should remain possible: %v", err)
+	}
+}
+
+func TestUpgradeTransaction(t *testing.T) {
+	manager, fr, paths, source := testManager(t)
+	if err := os.WriteFile(source, []byte("v1 binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+		t.Fatal(err)
+	}
+	oldUnit, _ := os.ReadFile(paths.Unit)
+	oldBinary, _ := os.ReadFile(paths.Binary)
+
+	t.Run("restart failure rolls back unit and binary", func(t *testing.T) {
+		if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		fr.calls = nil
+		fr.handler = func(name string, args ...string) (string, int, error) {
+			if fr.contains(args, "restart") {
+				return "Failed", 1, nil
+			}
+			return "", 0, nil
+		}
+		if err := manager.Upgrade(source, paths, "127.0.0.1:9001", ""); err == nil {
+			t.Fatal("upgrade should fail")
+		}
+		gotUnit, _ := os.ReadFile(paths.Unit)
+		gotBinary, _ := os.ReadFile(paths.Binary)
+		if string(gotUnit) != string(oldUnit) || string(gotBinary) != string(oldBinary) {
+			t.Fatalf("failed upgrade left mixed state: unit=%q binary=%q", gotUnit, gotBinary)
+		}
+		meta, _, _ := manager.ExistingMeta(paths)
+		if meta.Listen != "127.0.0.1:9001" {
+			t.Fatalf("metadata not rolled back: %q", meta.Listen)
+		}
+		fr.handler = nil
+	})
+
+	t.Run("fresh install failure removes new artifacts", func(t *testing.T) {
+		manager2, fr2, paths2, source2 := testManager(t)
+		fr2.handler = func(name string, args ...string) (string, int, error) {
+			if fr2.contains(args, "enable") {
+				return "Failed", 1, nil
+			}
+			return "", 0, nil
+		}
+		if err := manager2.Install(source2, paths2, "127.0.0.1:9002", ""); err == nil {
+			t.Fatal("install should fail")
+		}
+		if _, err := os.Stat(paths2.Unit); !os.IsNotExist(err) {
+			t.Fatalf("unit not removed after failed fresh install: %v", err)
+		}
+		if _, err := os.Stat(paths2.Binary); !os.IsNotExist(err) {
+			t.Fatalf("binary not removed after failed fresh install: %v", err)
+		}
+	})
+
+	t.Run("staging failure leaves state intact", func(t *testing.T) {
+		if err := os.Chmod(filepath.Dir(paths.Binary), 0500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Dir(paths.Binary), 0700) })
+		if err := manager.Upgrade(source, paths, "127.0.0.1:9001", ""); err == nil {
+			t.Fatal("upgrade should fail when staging cannot write")
+		}
+		gotUnit, _ := os.ReadFile(paths.Unit)
+		gotBinary, _ := os.ReadFile(paths.Binary)
+		if string(gotUnit) != string(oldUnit) || string(gotBinary) != string(oldBinary) {
+			t.Fatalf("staging failure changed installed state")
+		}
+	})
+}
+
+func TestReleaseMatrixBuilds(t *testing.T) {
+	targets := []struct{ goos, goarch string }{
+		{"linux", "amd64"}, {"linux", "arm64"},
+		{"darwin", "amd64"}, {"darwin", "arm64"},
+		{"windows", "amd64"}, {"windows", "arm64"},
+	}
+	for _, tc := range targets {
+		t.Run(tc.goos+"/"+tc.goarch, func(t *testing.T) {
+			dir := t.TempDir()
+			cmd := exec.Command("go", "build", "-o", filepath.Join(dir, "svc"), ".")
+			cmd.Env = append(os.Environ(), "GOOS="+tc.goos, "GOARCH="+tc.goarch, "CGO_ENABLED=0")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s/%s build failed: %v\n%s", tc.goos, tc.goarch, err, out)
+			}
+		})
+	}
 }
 
 func TestLogsReportsNonzeroJournalctl(t *testing.T) {
