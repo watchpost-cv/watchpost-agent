@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -44,13 +45,16 @@ type Paths struct {
 	System  bool
 }
 
-// Resolve returns the stable paths for the agent in user or system mode.
+// Resolve returns the stable paths for the agent in user mode. System-wide
+// mode is intentionally not supported yet: the previous implementation ran the
+// agent web service as root, which is not an acceptable default. A dedicated
+// unprivileged account design is a documented follow-up.
 func Resolve(system bool) (Paths, error) {
 	if runtime.GOOS != "linux" {
 		return Paths{}, errors.New("service installation currently requires Linux systemd")
 	}
 	if system {
-		return Paths{Binary: "/usr/local/lib/watchpost-agent/watchpost-agent", DataDir: "/var/lib/watchpost-agent", Unit: "/etc/systemd/system/watchpost-agent.service", System: true}, nil
+		return Paths{}, errors.New("--system is not supported yet: it previously ran the agent web service as root; a dedicated unprivileged service account is a documented follow-up")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -263,7 +267,7 @@ func (m Manager) requireManaged(paths Paths, verb string) error {
 	return nil
 }
 
-func renderUnitBody(paths Paths, listen string) string {
+func renderUnitBody(paths Paths, listen, envfile string) string {
 	wanted := "default.target"
 	if paths.System {
 		wanted = "multi-user.target"
@@ -288,6 +292,9 @@ func renderUnitBody(paths Paths, listen string) string {
 	b.WriteString("ProtectHome=read-only\n")
 	b.WriteString("ReadWritePaths=" + paths.DataDir + "\n")
 	b.WriteString("Environment=HOME=%h\n")
+	if envfile != "" {
+		b.WriteString("EnvironmentFile=" + systemdQuote(envfile) + "\n")
+	}
 	b.WriteString("\n[Install]\n")
 	b.WriteString("WantedBy=" + wanted + "\n")
 	return b.String()
@@ -295,17 +302,92 @@ func renderUnitBody(paths Paths, listen string) string {
 
 // Unit renders the full managed unit: a marker line, a versioned integrity
 // header carrying the SHA-256 of the managed content below it, the runtime
-// metadata (listen/health) used by status, and the body.
-func Unit(paths Paths, listen string) string {
-	content := "# watchpost-agent-listen: " + listen + "\n# watchpost-agent-health: " + healthPath + "\n" + renderUnitBody(paths, listen)
+// metadata (listen/health/envfile) used by status, and the body.
+func Unit(paths Paths, listen, envfile string) string {
+	meta := "# watchpost-agent-listen: " + listen + "\n"
+	if envfile != "" {
+		meta += "# watchpost-agent-envfile: " + envfile + "\n"
+	}
+	meta += "# watchpost-agent-health: " + healthPath + "\n"
+	content := meta + renderUnitBody(paths, listen, envfile)
 	sum := sha256.Sum256([]byte(content))
 	header := unitMarker + "\n" + managedPrefix + "v1 sha256=" + hex.EncodeToString(sum[:]) + "\n"
 	return header + content
 }
 
 type unitMeta struct {
-	listen string
-	health string
+	listen  string
+	envfile string
+	health  string
+}
+
+// Meta is the exported view of a managed unit's authenticated metadata.
+type Meta struct {
+	Listen  string
+	EnvFile string
+}
+
+// ExistingMeta returns the installed managed unit's authenticated metadata, or
+// ok=false when no unit is installed. A foreign or modified unit is an error so
+// install/upgrade never silently diverge from it.
+func (m Manager) ExistingMeta(paths Paths) (Meta, bool, error) {
+	meta, err := readManagedUnit(paths.Unit)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Meta{}, false, nil
+		}
+		return Meta{}, false, fmt.Errorf("existing unit at %s is not valid: %w", paths.Unit, err)
+	}
+	return Meta{Listen: meta.listen, EnvFile: meta.envfile}, true, nil
+}
+
+// PreserveInstallValues fills values the operator did not explicitly set from
+// the existing managed metadata, so install/upgrade never silently replace
+// installed configuration with CLI defaults.
+func PreserveInstallValues(existing Meta, listenSet bool, listen string, envfileSet bool, envfile string) (string, string) {
+	if !listenSet && existing.Listen != "" {
+		listen = existing.Listen
+	}
+	if !envfileSet && existing.EnvFile != "" {
+		envfile = existing.EnvFile
+	}
+	return listen, envfile
+}
+
+// validateEnvFile validates an EnvironmentFile path for the service unit:
+// absolute, a regular non-symlink file, owner-only permissions, owned by the
+// invoking user, and free of systemd specifier and control characters. Secret
+// values are never read or embedded.
+func validateEnvFile(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("environment file %q must be an absolute path", path)
+	}
+	if err := validateNoControl(path, "environment file"); err != nil {
+		return err
+	}
+	if strings.ContainsAny(path, "%") {
+		return fmt.Errorf("environment file %q must not contain systemd specifiers (%% )", path)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("environment file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("environment file %q must not be a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("environment file %q must be a regular file", path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("environment file %q must not be group- or world-writable", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("environment file %q must be owner-only (0600)", path)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Uid) != os.Getuid() {
+		return fmt.Errorf("environment file %q must be owned by the invoking user", path)
+	}
+	return nil
 }
 
 func readManagedUnit(path string) (unitMeta, error) {
@@ -336,7 +418,7 @@ func readManagedUnit(path string) (unitMeta, error) {
 		return unitMeta{}, errModified
 	}
 	meta := unitMeta{}
-	listenSeen, healthSeen := 0, 0
+	listenSeen, envfileSeen, healthSeen := 0, 0, 0
 	for _, ln := range lines[2:] {
 		switch {
 		case strings.HasPrefix(ln, "# watchpost-agent-listen: "):
@@ -345,6 +427,12 @@ func readManagedUnit(path string) (unitMeta, error) {
 				return unitMeta{}, errMalformed
 			}
 			meta.listen = strings.TrimSpace(strings.TrimPrefix(ln, "# watchpost-agent-listen: "))
+		case strings.HasPrefix(ln, "# watchpost-agent-envfile: "):
+			envfileSeen++
+			if envfileSeen > 1 {
+				return unitMeta{}, errMalformed
+			}
+			meta.envfile = strings.TrimSpace(strings.TrimPrefix(ln, "# watchpost-agent-envfile: "))
 		case strings.HasPrefix(ln, "# watchpost-agent-health: "):
 			healthSeen++
 			if healthSeen > 1 {
@@ -356,11 +444,22 @@ func readManagedUnit(path string) (unitMeta, error) {
 	if listenSeen != 1 || healthSeen != 1 || meta.listen == "" || meta.health == "" {
 		return unitMeta{}, errMalformed
 	}
+	if envfileSeen > 1 {
+		return unitMeta{}, errMalformed
+	}
 	if meta.health != healthPath {
 		return unitMeta{}, errMalformed
 	}
 	if err := validateNoControl(meta.listen, "listen"); err != nil {
 		return unitMeta{}, errMalformed
+	}
+	if meta.envfile != "" {
+		if err := validateNoControl(meta.envfile, "environment file"); err != nil {
+			return unitMeta{}, errMalformed
+		}
+		if strings.ContainsAny(meta.envfile, "%") {
+			return unitMeta{}, errMalformed
+		}
 	}
 	return meta, nil
 }
@@ -440,20 +539,45 @@ func syncDir(dir string) {
 	}
 }
 
-func unitBackupSuffix() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
+var (
+	linkFile = os.Link
+	removeFile = os.Remove
+	randomSuffix = func() (string, error) {
+		b := make([]byte, 8)
+		if _, err := rand.Read(b); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(b), nil
+	}
+)
 
+// backupManagedUnit moves the managed unit aside to a unique hidden backup name
+// in the same directory. It uses an exclusive hard link so an existing retained
+// backup is never overwritten; the original is unlinked only after the backup
+// link exists, and on any failure the original stays intact with no backup
+// artifact left behind.
 func backupManagedUnit(path string) (string, error) {
 	dir := filepath.Dir(path)
-	backup := filepath.Join(dir, "."+filepath.Base(path)+".unit-backup-"+unitBackupSuffix())
-	if err := os.Rename(path, backup); err != nil {
-		return "", err
+	for i := 0; i < 32; i++ {
+		suffix, err := randomSuffix()
+		if err != nil {
+			return "", fmt.Errorf("cannot generate a backup name: %w", err)
+		}
+		backup := filepath.Join(dir, "."+filepath.Base(path)+".unit-backup-"+suffix)
+		if err := linkFile(path, backup); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue // candidate already exists; try another name
+			}
+			return "", err
+		}
+		if err := removeFile(path); err != nil {
+			_ = os.Remove(backup)
+			return "", fmt.Errorf("cannot remove the original after backing it up: %w", err)
+		}
+		syncDir(dir)
+		return backup, nil
 	}
-	syncDir(dir)
-	return backup, nil
+	return "", errors.New("could not allocate a unique backup name")
 }
 
 func restoreFromBackup(orig, backup string) error {
@@ -495,8 +619,10 @@ func healthCheck(url string) error {
 }
 
 // Install copies the agent binary to a stable path, writes the managed unit,
-// and reloads, enables and restarts the service. Upgrade is the same call.
-func (m Manager) Install(source string, paths Paths, listen string) error {
+// and reloads, enables and restarts the service. The unit is written before the
+// binary so a failed copy never leaves the unit and binary at mismatched
+// configuration. Upgrade is the same call.
+func (m Manager) Install(source string, paths Paths, listen, envfile string) error {
 	for _, v := range []struct{ val, name string }{
 		{listen, "listen"}, {paths.DataDir, "data-dir"},
 	} {
@@ -504,13 +630,18 @@ func (m Manager) Install(source string, paths Paths, listen string) error {
 			return err
 		}
 	}
+	if envfile != "" {
+		if err := validateEnvFile(envfile); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(paths.DataDir, 0700); err != nil {
 		return err
 	}
-	if err := atomicCopy(source, paths.Binary, 0755); err != nil {
+	if err := writeManagedUnit(paths.Unit, Unit(paths, listen, envfile)); err != nil {
 		return err
 	}
-	if err := writeManagedUnit(paths.Unit, Unit(paths, listen)); err != nil {
+	if err := atomicCopy(source, paths.Binary, 0755); err != nil {
 		return err
 	}
 	if err := m.systemctlSuccess(paths, "daemon-reload"); err != nil {
@@ -522,9 +653,9 @@ func (m Manager) Install(source string, paths Paths, listen string) error {
 	return m.systemctlSuccess(paths, "restart", "watchpost-agent.service")
 }
 
-// Upgrade reinstalls the current binary, replacing an existing installation.
-func (m Manager) Upgrade(source string, paths Paths, listen string) error {
-	return m.Install(source, paths, listen)
+// Upgrade reinstalls the current binary, preserving installed configuration.
+func (m Manager) Upgrade(source string, paths Paths, listen, envfile string) error {
+	return m.Install(source, paths, listen, envfile)
 }
 
 func (m Manager) Start(paths Paths) error {
@@ -575,6 +706,9 @@ func (m Manager) Status(out io.Writer, paths Paths, version string) error {
 	fmt.Fprintf(out, "pid:     %s\n", strings.TrimSpace(pid))
 	fmt.Fprintf(out, "version: %s\n", version)
 	fmt.Fprintf(out, "listen:  %s\n", meta.listen)
+	if meta.envfile != "" {
+		fmt.Fprintf(out, "env:     %s\n", meta.envfile)
+	}
 	if active != stateActive {
 		return fmt.Errorf("service is %q; expected active", active)
 	}

@@ -7,8 +7,35 @@ import (
 	"testing"
 
 	"github.com/watchpost-ops/watchpost-agent/internal/app"
+	"github.com/watchpost-ops/watchpost-agent/internal/service"
 	"github.com/watchpost-ops/watchpost-agent/internal/state"
 )
+
+func TestUnitMatchesForegroundConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	paths := service.Paths{Binary: "/usr/local/lib/watchpost-agent/watchpost-agent", DataDir: defaultDataDir()}
+	unit := service.Unit(paths, "127.0.0.1:8090", "")
+	for _, want := range []string{`"--listen" "127.0.0.1:8090"`, `"--data-dir" "` + paths.DataDir + `"`} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("unit does not match foreground defaults (%s):\n%s", want, unit)
+		}
+	}
+}
+
+func TestServiceNamespaceDispatch(t *testing.T) {
+	// `watchpost-agent service status` and `watchpost-agent status` both resolve
+	// to the service command and report a missing unit without touching systemd.
+	t.Setenv("HOME", t.TempDir())
+	for _, args := range [][]string{{"service", "status"}, {"status"}} {
+		err := run(args)
+		if err == nil {
+			t.Fatalf("%v unexpectedly succeeded", args)
+		}
+		if !strings.Contains(err.Error(), "not installed") {
+			t.Fatalf("%v error: %v", args, err)
+		}
+	}
+}
 
 func TestAppOptionsRequireExplicitRemoteExposure(t *testing.T) {
 	if _, err := appOptions("127.0.0.1:8090"); err != nil {

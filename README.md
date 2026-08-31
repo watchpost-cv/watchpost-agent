@@ -36,23 +36,17 @@ security and pairing arrive in WP-A03–WP-A06.
 Install the per-user service before pairing:
 
 ```sh
-./watchpost-agent install
-./watchpost-agent status
-./watchpost-agent logs            # or: ./watchpost-agent logs --follow
-./watchpost-agent restart
-./watchpost-agent stop
-./watchpost-agent start
+./watchpost-agent service install
+./watchpost-agent service status
+./watchpost-agent service logs            # or: ... service logs --follow
+./watchpost-agent service restart
+./watchpost-agent service stop
+./watchpost-agent service start
 ```
 
-For a deliberate machine-wide service, run as an appropriately privileged
-administrator:
-
-```sh
-sudo ./watchpost-agent install --system
-```
-
-The same lifecycle commands (`status`, `logs`, `restart`, `stop`, `start`,
-`uninstall`) accept `--system` to manage the system unit.
+`watchpost-agent service ...` is the canonical form; the top-level
+`install`/`upgrade`/`status`/`start`/`stop`/`restart`/`logs`/`uninstall`
+commands remain as compatibility aliases.
 
 Installation is idempotent and atomically replaces the installed executable,
 then restarts the service. The generated unit carries a versioned SHA-256
@@ -61,14 +55,36 @@ or removed silently, and lifecycle commands refuse to operate on it. `status`
 reports enabled/running state, PID, version, listen address and a live health
 check of the public `GET /healthz` endpoint, and exits nonzero when the service
 is failed or missing. An unpaired service is a supported quiet state. Use
-`./watchpost-agent uninstall` (or `--system`) to remove the service and
-installed binary; private state is retained for explicit recovery or reset.
-Uninstall stops and disables the service only after verifying safe states and
-restores the unit atomically if the final reload fails.
+`./watchpost-agent service uninstall` to remove the service and installed
+binary; private state is retained for explicit recovery or reset. Uninstall
+stops and disables the service only after verifying safe states and restores
+the unit atomically if the final reload fails.
 
-Use `./watchpost-agent upgrade` after replacing the downloaded executable.
-It atomically replaces the stable installed binary and restarts the service
+`service install --listen` and `service install --env-file` record the agent's
+listen address and an optional protected environment file for
+`WATCHPOST_AGENT_*` variables (exposure, secure cookies, CIDR policy, setup
+token file):
+
+```sh
+./watchpost-agent service install --env-file /absolute/protected/agent.env
+```
+
+The environment file must be an absolute, regular, owner-only (0600),
+non-symlink file owned by the invoking user; it is referenced by the unit's
+`EnvironmentFile=` and its path is recorded in the authenticated managed
+metadata. Secret values are never copied into the unit or printed. Changing it
+takes effect on `service restart`.
+
+`service upgrade` (or `upgrade`) after replacing the downloaded executable
+atomically replaces the stable installed binary and restarts the service
 without changing installation identity, local configuration, queue or pairing.
+It preserves the installed listen address and environment file unless you pass
+an explicit `--listen`/`--env-file` override.
+
+`--system` is **not currently supported**: the previous system-wide mode ran
+the agent's web service (setup, login, configuration, pairing, rotation, reset
+and account-management endpoints) as root, which is not an acceptable default.
+A dedicated unprivileged service account design is a documented follow-up.
 
 The local website requires an email address and a seven-character-or-longer
 administrator password. For a headless server, configure the same state without

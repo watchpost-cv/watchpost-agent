@@ -37,6 +37,11 @@ func run(arguments []string) error {
 	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure" || arguments[0] == "rotate" || arguments[0] == "unpair" || arguments[0] == "reset") {
 		return localCommand(arguments[0], arguments[1:])
 	}
+	// `watchpost-agent service ...` is the canonical namespace; the top-level
+	// forms below remain as compatibility aliases.
+	if len(arguments) > 1 && arguments[0] == "service" {
+		return serviceCommand(arguments[1], arguments[2:])
+	}
 	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "upgrade" || arguments[0] == "start" || arguments[0] == "stop" || arguments[0] == "restart" || arguments[0] == "status" || arguments[0] == "logs" || arguments[0] == "uninstall") {
 		return serviceCommand(arguments[0], arguments[1:])
 	}
@@ -231,9 +236,10 @@ func localCommand(action string, arguments []string) error {
 
 func serviceCommand(action string, arguments []string) error {
 	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)
-	system := flags.Bool("system", false, "manage a system-wide service")
+	system := flags.Bool("system", false, "manage a system-wide service (not yet supported)")
 	follow := flags.Bool("follow", false, "follow new journal output")
 	listen := flags.String("listen", "127.0.0.1:8090", "local agent UI address recorded in the unit")
+	envFile := flags.String("env-file", "", "absolute owner-only environment file for WATCHPOST_AGENT_* variables")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -251,7 +257,16 @@ func serviceCommand(action string, arguments []string) error {
 		if err != nil {
 			return err
 		}
-		return manager.Install(executable, paths, *listen)
+		// Preserve installed configuration on repeat install/upgrade unless the
+		// operator explicitly overrides it.
+		visited := map[string]bool{}
+		flags.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+		if meta, ok, err := manager.ExistingMeta(paths); err != nil {
+			return err
+		} else if ok {
+			*listen, *envFile = service.PreserveInstallValues(meta, visited["listen"], *listen, visited["env-file"], *envFile)
+		}
+		return manager.Install(executable, paths, *listen, *envFile)
 	case "start":
 		return manager.Start(paths)
 	case "stop":
