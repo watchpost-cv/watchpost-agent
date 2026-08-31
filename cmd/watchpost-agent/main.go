@@ -37,7 +37,7 @@ func run(arguments []string) error {
 	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure" || arguments[0] == "rotate" || arguments[0] == "unpair" || arguments[0] == "reset") {
 		return localCommand(arguments[0], arguments[1:])
 	}
-	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "upgrade" || arguments[0] == "status" || arguments[0] == "uninstall") {
+	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "upgrade" || arguments[0] == "start" || arguments[0] == "stop" || arguments[0] == "restart" || arguments[0] == "status" || arguments[0] == "logs" || arguments[0] == "uninstall") {
 		return serviceCommand(arguments[0], arguments[1:])
 	}
 	flags := flag.NewFlagSet("watchpost-agent", flag.ContinueOnError)
@@ -232,6 +232,8 @@ func localCommand(action string, arguments []string) error {
 func serviceCommand(action string, arguments []string) error {
 	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)
 	system := flags.Bool("system", false, "manage a system-wide service")
+	follow := flags.Bool("follow", false, "follow new journal output")
+	listen := flags.String("listen", "127.0.0.1:8090", "local agent UI address recorded in the unit")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -244,22 +246,24 @@ func serviceCommand(action string, arguments []string) error {
 	}
 	manager := service.New()
 	switch action {
-	case "install":
+	case "install", "upgrade":
 		executable, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		return manager.Install(executable, paths)
-	case "upgrade":
-		executable, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		return manager.Install(executable, paths)
+		return manager.Install(executable, paths, *listen)
+	case "start":
+		return manager.Start(paths)
+	case "stop":
+		return manager.Stop(paths)
+	case "restart":
+		return manager.Restart(paths)
 	case "status":
-		return manager.Status(paths)
+		return manager.Status(os.Stdout, paths, version)
+	case "logs":
+		return manager.Logs(*follow, os.Stdout, paths)
 	case "uninstall":
-		return manager.Uninstall(paths)
+		return manager.Uninstall(os.Stdout, paths)
 	}
 	return fmt.Errorf("unknown service action")
 }

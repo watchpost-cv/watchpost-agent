@@ -38,6 +38,10 @@ Install the per-user service before pairing:
 ```sh
 ./watchpost-agent install
 ./watchpost-agent status
+./watchpost-agent logs            # or: ./watchpost-agent logs --follow
+./watchpost-agent restart
+./watchpost-agent stop
+./watchpost-agent start
 ```
 
 For a deliberate machine-wide service, run as an appropriately privileged
@@ -47,10 +51,20 @@ administrator:
 sudo ./watchpost-agent install --system
 ```
 
+The same lifecycle commands (`status`, `logs`, `restart`, `stop`, `start`,
+`uninstall`) accept `--system` to manage the system unit.
+
 Installation is idempotent and atomically replaces the installed executable,
-then restarts the service. An unpaired service is a supported quiet state. Use
-`./watchpost-agent uninstall` (or `--system`) to remove the service and installed
-binary; private state is retained for explicit recovery or reset.
+then restarts the service. The generated unit carries a versioned SHA-256
+managed-unit header, so a hand-modified or foreign unit is never overwritten
+or removed silently, and lifecycle commands refuse to operate on it. `status`
+reports enabled/running state, PID, version, listen address and a live health
+check of the public `GET /healthz` endpoint, and exits nonzero when the service
+is failed or missing. An unpaired service is a supported quiet state. Use
+`./watchpost-agent uninstall` (or `--system`) to remove the service and
+installed binary; private state is retained for explicit recovery or reset.
+Uninstall stops and disables the service only after verifying safe states and
+restores the unit atomically if the final reload fails.
 
 Use `./watchpost-agent upgrade` after replacing the downloaded executable.
 It atomically replaces the stable installed binary and restarts the service
