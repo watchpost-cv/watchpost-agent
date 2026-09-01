@@ -175,10 +175,19 @@ bounded local audit log visible to administrators.
 ### Remote exposure is experimental
 
 The interface defaults to loopback and is not a hardened internet service.
-Binding a non-loopback address requires an explicit
-`WATCHPOST_AGENT_EXPOSE=1` opt-in and prints a prominent warning. For any
-remote use terminate HTTPS at a reviewed reverse proxy, set
-`WATCHPOST_AGENT_SECURE_COOKIES=1`, list the proxy in
+The ordinary fleet model keeps the UI on `127.0.0.1`: the Agent initiates
+telemetry delivery outbound to central Watchpost, and administrators reach a
+single Agent's UI safely through an SSH tunnel without publishing it to the
+network:
+
+```sh
+ssh -L 8090:127.0.0.1:8090 operator@monitored-host
+```
+
+Then open `http://127.0.0.1:8090` in the local browser. Binding a non-loopback
+address requires an explicit `WATCHPOST_AGENT_EXPOSE=1` opt-in and prints a
+prominent warning. For any remote use terminate HTTPS at a reviewed reverse
+proxy, set `WATCHPOST_AGENT_SECURE_COOKIES=1`, list the proxy in
 `WATCHPOST_AGENT_TRUSTED_PROXIES` (comma-separated CIDRs or addresses — for a
 local proxy use `127.0.0.0/8`) so forwarded scheme/host are honoured only when
 the immediate peer is that trusted proxy, and restrict clients with
@@ -188,7 +197,10 @@ unresolvable client address fails closed. The first-run setup requires a
 bootstrap token whenever the interface is remotely exposed or an operator
 supplied one (see "First-run setup"). Review the local audit log. Loopback
 binding remains the documented recovery path: with no client policy configured,
-requests are never blocked on address resolution.
+requests are never blocked on address resolution. Remote Agent exposure stays
+experimental; never assume `127.0.0.1` on the Agent host refers to another
+machine, and do not present one publicly exposed Agent as representing the
+fleet.
 
 Pair from the local website, or use the equivalent flow on a headless server:
 

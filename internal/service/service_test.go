@@ -1156,6 +1156,395 @@ func TestUpgradeTransaction(t *testing.T) {
 	})
 }
 
+// fakeSystemd is a stateful model of a per-user systemd manager used by the
+// service transaction tests. It holds the unit's enablement and active states,
+// answers is-enabled/is-active and the lifecycle verbs against that model, and
+// records every call so tests can assert both the exact calls and the final
+// state rather than relying on substring assertions. The unit's loaded state is
+// derived from the managed unit file's presence, so a rollback that removes the
+// unit also makes is-enabled report not-found and is-active report inactive.
+type fakeSystemd struct {
+	mu       sync.Mutex
+	unitPath string
+	enabled  string
+	active   string
+	failVerb string
+	calls    []string
+}
+
+func newFakeSystemd(unitPath string) *fakeSystemd {
+	return &fakeSystemd{unitPath: unitPath, enabled: "disabled", active: "inactive"}
+}
+
+func exitForEnabled(word string) int {
+	switch word {
+	case "enabled", "enabled-runtime", "static", "alias", "indirect", "generated":
+		return 0
+	case "disabled", "masked", "masked-runtime", "linked", "linked-runtime", "transient":
+		return 1
+	case "not-found", "unknown":
+		return 4
+	}
+	return 1
+}
+
+func exitForActive(word string) int {
+	switch word {
+	case "active", "reloading":
+		return 0
+	case "inactive", "dead", "failed", "activating", "deactivating", "maintenance":
+		return 3
+	case "not-found", "unknown":
+		return 4
+	}
+	return 3
+}
+
+func (f *fakeSystemd) runner(fr *fakeRunner) {
+	fr.handler = func(name string, args ...string) (string, int, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+		verb := ""
+		for _, a := range args {
+			if a != "--user" && a != "watchpost-agent.service" && a != "--runtime" {
+				verb = a
+				break
+			}
+		}
+		fail := f.failVerb != "" && f.failVerb == verb
+		if fail {
+			f.failVerb = ""
+		}
+		if verb == "daemon-reload" {
+			if fail {
+				return "reload failed", 1, nil
+			}
+			return "", 0, nil
+		}
+		if verb == "is-enabled" {
+			word := f.enabled
+			if _, err := os.Stat(f.unitPath); err != nil {
+				word = "not-found"
+			}
+			return word, exitForEnabled(word), nil
+		}
+		if verb == "is-active" {
+			word := f.active
+			if _, err := os.Stat(f.unitPath); err != nil {
+				word = "inactive"
+			}
+			return word, exitForActive(word), nil
+		}
+		switch verb {
+		case "enable", "disable", "mask":
+			if containsStr(args, "--runtime") {
+				verb = verb + "-runtime"
+			}
+			switch verb {
+			case "enable":
+				f.enabled = "enabled"
+			case "enable-runtime":
+				f.enabled = "enabled-runtime"
+			case "disable":
+				f.enabled = "disabled"
+			case "mask":
+				f.enabled = "masked"
+			case "mask-runtime":
+				f.enabled = "masked-runtime"
+			}
+		case "start", "restart":
+			f.active = "active"
+		case "stop":
+			f.active = "inactive"
+		}
+		if fail {
+			return verb + " failed", 1, nil
+		}
+		return "", 0, nil
+	}
+}
+
+func (f *fakeSystemd) setState(enabled, active string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.enabled = enabled
+	f.active = active
+}
+
+func (f *fakeSystemd) callsContain(needle string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.calls {
+		if strings.Contains(c, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsStr(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func TestInstallNoOpAndChange(t *testing.T) {
+	t.Run("fresh install publishes unit and binary and starts", func(t *testing.T) {
+		manager, fr, paths, source := testManager(t)
+		fs := newFakeSystemd(paths.Unit)
+		fs.runner(fr)
+		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+			t.Fatalf("install: %v", err)
+		}
+		if _, err := readManagedUnitBytes(t, mustRead(t, paths.Unit)); err != nil {
+			t.Fatalf("installed unit invalid: %v", err)
+		}
+		if _, err := os.Stat(paths.Binary); err != nil {
+			t.Fatalf("binary not published: %v", err)
+		}
+		for _, want := range []string{"daemon-reload", "enable watchpost-agent.service", "restart watchpost-agent.service"} {
+			if !fs.callsContain(want) {
+				t.Fatalf("fresh install did not call %q\ncalls: %v", want, fs.calls)
+			}
+		}
+		if fs.active != "active" || fs.enabled != "enabled" {
+			t.Fatalf("fresh install left %q/%q", fs.enabled, fs.active)
+		}
+	})
+
+	t.Run("identical unit and binary on enabled active service is a true no-op", func(t *testing.T) {
+		manager, fr, paths, source := testManager(t)
+		fs := newFakeSystemd(paths.Unit)
+		fs.runner(fr)
+		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+			t.Fatal(err)
+		}
+		fs.setState("enabled", "active")
+		fs.calls = nil
+		fiUnit, _ := os.Stat(paths.Unit)
+		fiBin, _ := os.Stat(paths.Binary)
+		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+			t.Fatalf("no-op install: %v", err)
+		}
+		for _, forbid := range []string{"daemon-reload", "enable ", "restart ", "start "} {
+			if fs.callsContain(forbid) {
+				t.Fatalf("no-op install mutated systemd (%q)\ncalls: %v", forbid, fs.calls)
+			}
+		}
+		if fiUnit2, _ := os.Stat(paths.Unit); !fiUnit.ModTime().Equal(fiUnit2.ModTime()) {
+			t.Fatal("no-op install rewrote the unit")
+		}
+		if fiBin2, _ := os.Stat(paths.Binary); !fiBin.ModTime().Equal(fiBin2.ModTime()) {
+			t.Fatal("no-op install rewrote the binary")
+		}
+	})
+
+	t.Run("changed binary restarts the service", func(t *testing.T) {
+		manager, fr, paths, source := testManager(t)
+		fs := newFakeSystemd(paths.Unit)
+		fs.runner(fr)
+		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+			t.Fatal(err)
+		}
+		fs.setState("enabled", "active")
+		fs.calls = nil
+		if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.Upgrade(source, paths, "127.0.0.1:9001", ""); err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		if !fs.callsContain("restart watchpost-agent.service") {
+			t.Fatalf("binary change did not restart\ncalls: %v", fs.calls)
+		}
+		if got, _ := os.ReadFile(paths.Binary); string(got) != "v2 binary" {
+			t.Fatalf("binary not replaced: %q", got)
+		}
+	})
+
+	t.Run("unchanged artifacts on inactive service starts it", func(t *testing.T) {
+		manager, fr, paths, source := testManager(t)
+		fs := newFakeSystemd(paths.Unit)
+		fs.runner(fr)
+		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+			t.Fatal(err)
+		}
+		fs.setState("enabled", "inactive")
+		fs.calls = nil
+		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+			t.Fatalf("inactive reinstall: %v", err)
+		}
+		if !fs.callsContain("start watchpost-agent.service") {
+			t.Fatalf("inactive service was not started\ncalls: %v", fs.calls)
+		}
+		if fs.callsContain("daemon-reload") || fs.callsContain("restart ") {
+			t.Fatalf("unchanged inactive reinstall did unnecessary work\ncalls: %v", fs.calls)
+		}
+	})
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestInstallRefusesNonRestorablePriorState(t *testing.T) {
+	enabledWords := []struct {
+		word       string
+		restorable bool
+	}{
+		{"enabled", true}, {"enabled-runtime", true}, {"masked", true}, {"masked-runtime", true},
+		{"disabled", true}, {"not-found", true},
+		{"static", false}, {"alias", false}, {"indirect", false}, {"generated", false},
+		{"linked", false}, {"linked-runtime", false}, {"transient", false}, {"unknown", false},
+	}
+	activeWords := []struct {
+		word       string
+		restorable bool
+	}{
+		{"active", true}, {"inactive", true}, {"dead", true}, {"unknown", true}, {"not-found", true},
+		{"failed", false}, {"reloading", false}, {"refreshing", false}, {"activating", false},
+		{"deactivating", false}, {"maintenance", false},
+	}
+	for _, ew := range enabledWords {
+		for _, aw := range activeWords {
+			t.Run("enabled="+ew.word+"/active="+aw.word, func(t *testing.T) {
+				manager, fr, paths, source := testManager(t)
+				fs := newFakeSystemd(paths.Unit)
+				fs.runner(fr)
+				if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+					t.Fatal(err)
+				}
+				fs.setState(ew.word, aw.word)
+				fs.calls = nil
+				beforeUnit := mustRead(t, paths.Unit)
+				beforeBin := mustRead(t, paths.Binary)
+				if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				err := manager.Upgrade(source, paths, "127.0.0.1:9003", "")
+				restorable := ew.restorable && aw.restorable
+				if restorable {
+					if err != nil {
+						t.Fatalf("restorable prior state refused install: %v", err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatalf("non-restorable prior state (%q/%q) was not refused", ew.word, aw.word)
+				}
+				if string(beforeUnit) != string(mustRead(t, paths.Unit)) {
+					t.Fatal("refusal changed the unit file")
+				}
+				if string(beforeBin) != string(mustRead(t, paths.Binary)) {
+					t.Fatal("refusal changed the binary")
+				}
+				for _, forbid := range []string{"daemon-reload", "enable ", "mask ", "disable ", "restart ", "start ", "stop "} {
+					if fs.callsContain(forbid) {
+						t.Fatalf("refusal performed a lifecycle mutation (%q)\ncalls: %v", forbid, fs.calls)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestInstallFailureRestoresPriorState(t *testing.T) {
+	steps := []struct {
+		verb string
+	}{
+		{"daemon-reload"}, {"enable"}, {"restart"},
+	}
+	t.Run("fresh install", func(t *testing.T) {
+		for _, st := range steps {
+			t.Run(st.verb, func(t *testing.T) {
+				manager, fr, paths, source := testManager(t)
+				fs := newFakeSystemd(paths.Unit)
+				fs.runner(fr)
+				fs.failVerb = st.verb
+				if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err == nil {
+					t.Fatalf("install with %s failure did not fail", st.verb)
+				}
+				if _, statErr := os.Stat(paths.Unit); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("failed fresh install left the unit behind")
+				}
+				if _, statErr := os.Stat(paths.Binary); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("failed fresh install left the binary behind")
+				}
+				if fs.enabled != "disabled" || fs.active != "inactive" {
+					t.Fatalf("failed fresh install left %q/%q", fs.enabled, fs.active)
+				}
+				word, _, _ := manager.systemctl(paths, "is-enabled", "watchpost-agent.service")
+				if strings.TrimSpace(word) != "not-found" {
+					t.Fatalf("unit still reports enablement %q after failed fresh install", word)
+				}
+				word2, _, _ := manager.systemctl(paths, "is-active", "watchpost-agent.service")
+				if strings.TrimSpace(word2) != "inactive" {
+					t.Fatalf("unit still reports active %q after failed fresh install", word2)
+				}
+			})
+		}
+	})
+	t.Run("reinstall restores prior unit binary and lifecycle", func(t *testing.T) {
+		for _, st := range steps {
+			t.Run(st.verb, func(t *testing.T) {
+				manager, fr, paths, source := testManager(t)
+				fs := newFakeSystemd(paths.Unit)
+				fs.runner(fr)
+				if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+					t.Fatal(err)
+				}
+				priorUnit := mustRead(t, paths.Unit)
+				priorBin := mustRead(t, paths.Binary)
+				fs.setState("enabled-runtime", "inactive")
+				if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				fs.failVerb = st.verb
+				if err := manager.Upgrade(source, paths, "127.0.0.1:9004", ""); err == nil {
+					t.Fatalf("reinstall with %s failure did not fail", st.verb)
+				}
+				if string(priorUnit) != string(mustRead(t, paths.Unit)) {
+					t.Fatal("failed reinstall did not restore the prior unit")
+				}
+				if string(priorBin) != string(mustRead(t, paths.Binary)) {
+					t.Fatal("failed reinstall did not restore the prior binary")
+				}
+				if fs.enabled != "enabled-runtime" || fs.active != "inactive" {
+					t.Fatalf("rollback did not restore prior lifecycle, got %q/%q", fs.enabled, fs.active)
+				}
+			})
+		}
+	})
+	t.Run("reinstall failure at restart restores enabled active prior", func(t *testing.T) {
+		manager, fr, paths, source := testManager(t)
+		fs := newFakeSystemd(paths.Unit)
+		fs.runner(fr)
+		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+			t.Fatal(err)
+		}
+		fs.setState("enabled", "active")
+		if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		fs.failVerb = "restart"
+		if err := manager.Upgrade(source, paths, "127.0.0.1:9005", ""); err == nil {
+			t.Fatal("reinstall with restart failure did not fail")
+		}
+		if fs.enabled != "enabled" || fs.active != "active" {
+			t.Fatalf("rollback did not restore enabled+active, got %q/%q", fs.enabled, fs.active)
+		}
+	})
+}
+
 func TestReleaseMatrixBuilds(t *testing.T) {
 	targets := []struct{ goos, goarch string }{
 		{"linux", "amd64"}, {"linux", "arm64"},

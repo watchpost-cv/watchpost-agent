@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -131,7 +132,7 @@ func stateName(s svcState) string { return string(s) }
 type exitExpect int
 
 const (
-	exitZero     exitExpect = iota
+	exitZero exitExpect = iota
 	exitNonzero
 	exitEither
 )
@@ -637,42 +638,116 @@ func (m Manager) systemctlTolerantMissing(paths Paths, args ...string) error {
 	return nil
 }
 
-// rollbackInstall restores the prior unit, binary and systemd enabled/active
-// state after a failed install/upgrade, removing them for a fresh install. It
-// returns an explanatory string when rollback itself fails so callers never
-// claim a full rollback when only the files were restored.
-func (m Manager) rollbackInstall(paths Paths, oldUnit, oldBinary []byte, hadBinary bool, priorEnabled, priorActive svcState) string {
+// rawState returns the exact systemctl is-enabled/is-active output word. The
+// install transaction snapshots these raw words rather than the resolved
+// lifecycle categories so rollback can reproduce the precise prior state.
+func (m Manager) rawState(paths Paths, verb string) (string, error) {
+	out, _, err := m.systemctl(paths, verb, "watchpost-agent.service")
+	if err != nil {
+		return "", fmt.Errorf("cannot run systemctl %s: %w", verb, err)
+	}
+	word := strings.TrimSpace(out)
+	if word == "" {
+		return "", fmt.Errorf("systemctl %s returned no state", verb)
+	}
+	return word, nil
+}
+
+// restorableEnabledWord reports whether a prior is-enabled raw word can be
+// restored exactly. Enablement links (enabled, enabled-runtime, masked,
+// masked-runtime) and their absence (disabled, not-found) are restorable;
+// unit-file states that enable/disable cannot reproduce (static, alias,
+// indirect, generated, linked, linked-runtime, transient, unknown) are not.
+func restorableEnabledWord(word string) bool {
+	switch word {
+	case "enabled", "enabled-runtime", "masked", "masked-runtime", "disabled", "not-found":
+		return true
+	}
+	return false
+}
+
+// restorableActiveWord reports whether a prior is-active raw word can be
+// restored exactly. Running and stopped states are restorable; transient and
+// failed states cannot be reproduced deterministically.
+func restorableActiveWord(word string) bool {
+	switch word {
+	case "active", "inactive", "dead", "unknown", "not-found":
+		return true
+	}
+	return false
+}
+
+// enableRestoreArgs returns the systemctl call that reproduces a prior
+// is-enabled word exactly.
+func enableRestoreArgs(word, unit string) []string {
+	switch word {
+	case "enabled":
+		return []string{"enable", unit}
+	case "enabled-runtime":
+		return []string{"enable", "--runtime", unit}
+	case "masked":
+		return []string{"mask", unit}
+	case "masked-runtime":
+		return []string{"mask", "--runtime", unit}
+	}
+	return []string{"disable", unit}
+}
+
+// activeRestoreArgs returns the systemctl call that reproduces a prior
+// is-active word exactly.
+func activeRestoreArgs(word, unit string) []string {
+	if word == "active" {
+		return []string{"restart", unit}
+	}
+	return []string{"stop", unit}
+}
+
+// rollbackInstall restores the pre-install state after a failed publish or
+// lifecycle step. For a reinstall it restores the prior unit and binary bytes,
+// reloads systemd, then reproduces the exact prior enablement and active
+// states. For a failed fresh install it stops and disables the newly installed
+// unit while it is still loaded, then removes the unit and binary and reloads
+// systemd, so no enablement link, active service or published binary is left
+// behind. It returns an explanatory string when rollback itself fails so
+// callers never claim a full rollback when only part of it succeeded.
+func (m Manager) rollbackInstall(paths Paths, oldUnit, oldBinary []byte, hadUnit, hadBinary bool, priorEnabledWord, priorActiveWord string) string {
 	var errs []string
-	if oldUnit != nil {
+	if hadUnit {
 		if err := writeFileAtomic(paths.Unit, oldUnit, 0644); err != nil {
 			errs = append(errs, fmt.Sprintf("restore unit: %v", err))
 		}
-	} else if err := os.Remove(paths.Unit); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, fmt.Sprintf("remove new unit: %v", err))
-	}
-	if hadBinary {
-		if err := writeFileAtomic(paths.Binary, oldBinary, 0755); err != nil {
-			errs = append(errs, fmt.Sprintf("restore binary: %v", err))
+	} else {
+		if err := m.systemctlTolerantMissing(paths, "stop", "watchpost-agent.service"); err != nil {
+			errs = append(errs, fmt.Sprintf("stop new unit: %v", err))
 		}
-	} else if err := os.Remove(paths.Binary); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, fmt.Sprintf("remove new binary: %v", err))
+		if err := m.systemctlTolerantMissing(paths, "disable", "watchpost-agent.service"); err != nil {
+			errs = append(errs, fmt.Sprintf("disable new unit: %v", err))
+		}
+	}
+	if hadUnit {
+		if hadBinary {
+			if err := writeFileAtomic(paths.Binary, oldBinary, 0755); err != nil {
+				errs = append(errs, fmt.Sprintf("restore binary: %v", err))
+			}
+		}
+	} else {
+		if err := os.Remove(paths.Unit); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Sprintf("remove new unit: %v", err))
+		}
+		if err := os.Remove(paths.Binary); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Sprintf("remove new binary: %v", err))
+		}
 	}
 	if err := m.systemctlSuccess(paths, "daemon-reload"); err != nil {
 		errs = append(errs, fmt.Sprintf("reload systemd: %v", err))
 	}
-	if priorEnabled == stateEnabled {
-		if err := m.systemctlSuccess(paths, "enable", "watchpost-agent.service"); err != nil {
-			errs = append(errs, fmt.Sprintf("restore enabled: %v", err))
+	if hadUnit {
+		if err := m.systemctlSuccess(paths, enableRestoreArgs(priorEnabledWord, "watchpost-agent.service")...); err != nil {
+			errs = append(errs, fmt.Sprintf("restore enablement %q: %v", priorEnabledWord, err))
 		}
-	} else if err := m.systemctlTolerantMissing(paths, "disable", "watchpost-agent.service"); err != nil {
-		errs = append(errs, fmt.Sprintf("restore disabled: %v", err))
-	}
-	if priorActive == stateActive {
-		if err := m.systemctlSuccess(paths, "restart", "watchpost-agent.service"); err != nil {
-			errs = append(errs, fmt.Sprintf("restore active: %v", err))
+		if err := m.systemctlSuccess(paths, activeRestoreArgs(priorActiveWord, "watchpost-agent.service")...); err != nil {
+			errs = append(errs, fmt.Sprintf("restore active state %q: %v", priorActiveWord, err))
 		}
-	} else if err := m.systemctlTolerantMissing(paths, "stop", "watchpost-agent.service"); err != nil {
-		errs = append(errs, fmt.Sprintf("restore inactive: %v", err))
 	}
 	if len(errs) > 0 {
 		return "; rollback incomplete: " + strings.Join(errs, "; ")
@@ -688,8 +763,8 @@ func syncDir(dir string) {
 }
 
 var (
-	linkFile = os.Link
-	removeFile = os.Remove
+	linkFile     = os.Link
+	removeFile   = os.Remove
 	randomSuffix = func() (string, error) {
 		b := make([]byte, 8)
 		if _, err := rand.Read(b); err != nil {
@@ -771,7 +846,8 @@ func healthCheck(url string) error {
 // change), then the unit and binary are published, then the lifecycle runs.
 // Any copy, reload, enable or restart failure restores the prior unit and
 // binary (or removes them for a fresh install), so the installed state is
-// never a mix of old and new. Upgrade is the same call.
+// never a mix of old and new. A byte-identical unit and binary on an already
+// enabled and active service is a true no-op. Upgrade is the same call.
 func (m Manager) Install(source string, paths Paths, listen, envfile string) error {
 	for _, v := range []struct{ val, name string }{
 		{listen, "listen"}, {paths.DataDir, "data-dir"},
@@ -792,23 +868,26 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 		}
 	}
 	// A repeat install/upgrade must not overwrite a foreign or modified unit,
-	// and the prior enabled/active state is snapshotted so a failed operation
-	// can restore the previous systemd lifecycle state.
+	// and the exact prior enabled/active states are snapshotted so a failed
+	// operation restores the previous systemd lifecycle state precisely.
 	oldUnit, hasUnit := readFileIfPresent(paths.Unit)
-	priorEnabled := stateNotEnabled
-	priorActive := stateInactive
+	priorEnabledWord, priorActiveWord := "", ""
 	if hasUnit {
 		if _, err := readManagedUnit(paths.Unit); err != nil {
 			return fmt.Errorf("refusing to overwrite the existing unit: %w", err)
 		}
 		var err error
-		priorEnabled, err = m.queryState(paths, "is-enabled")
-		if err != nil {
-			return fmt.Errorf("cannot determine the prior enablement state: %w", err)
+		if priorEnabledWord, err = m.rawState(paths, "is-enabled"); err != nil {
+			return err
 		}
-		priorActive, err = m.queryState(paths, "is-active")
-		if err != nil {
-			return fmt.Errorf("cannot determine the prior service state: %w", err)
+		if !restorableEnabledWord(priorEnabledWord) {
+			return fmt.Errorf("refusing to reinstall the service: prior enablement state %q cannot be restored exactly; disable or unmask it first", priorEnabledWord)
+		}
+		if priorActiveWord, err = m.rawState(paths, "is-active"); err != nil {
+			return err
+		}
+		if !restorableActiveWord(priorActiveWord) {
+			return fmt.Errorf("refusing to reinstall the service: prior active state %q cannot be restored exactly; stop or restart it first", priorActiveWord)
 		}
 	}
 	oldBinary, hasBinary := readFileIfPresent(paths.Binary)
@@ -818,12 +897,43 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 		return err
 	}
 	defer func() { _ = os.Remove(stagedBin) }()
+	stagedBytes, err := os.ReadFile(stagedBin)
+	if err != nil {
+		return err
+	}
+	unit := Unit(paths, listen, envfile)
+	unitChanged := !hasUnit || string(oldUnit) != unit
+	binaryChanged := !hasBinary || !bytes.Equal(oldBinary, stagedBytes)
+	if !unitChanged && !binaryChanged {
+		// True no-op: byte-identical unit and binary already enabled and active.
+		if priorEnabledWord == "enabled" && priorActiveWord == "active" {
+			return nil
+		}
+		// Unchanged artifacts: only perform the lifecycle work required to
+		// reach the documented installed state (enabled and active).
+		steps := [][]string{}
+		if priorEnabledWord != "enabled" {
+			steps = append(steps, []string{"enable", "watchpost-agent.service"})
+		}
+		if priorActiveWord != "active" {
+			steps = append(steps, []string{"start", "watchpost-agent.service"})
+		}
+		for _, args := range steps {
+			if err := m.systemctlSuccess(paths, args...); err != nil {
+				if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasUnit, hasBinary, priorEnabledWord, priorActiveWord); rb != "" {
+					return fmt.Errorf("bringing the service to the installed state: %w%s", err, rb)
+				}
+				return fmt.Errorf("bringing the service to the installed state: %w", err)
+			}
+		}
+		return nil
+	}
 	// Publish the unit, then the binary.
-	if err := writeManagedUnit(paths.Unit, Unit(paths, listen, envfile)); err != nil {
+	if err := writeManagedUnit(paths.Unit, unit); err != nil {
 		return err
 	}
 	if err := os.Rename(stagedBin, paths.Binary); err != nil {
-		if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasBinary, priorEnabled, priorActive); rb != "" {
+		if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasUnit, hasBinary, priorEnabledWord, priorActiveWord); rb != "" {
 			return fmt.Errorf("cannot publish the binary: %w%s", err, rb)
 		}
 		return fmt.Errorf("cannot publish the binary: %w", err)
@@ -837,7 +947,7 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 		{"restart", []string{"restart", "watchpost-agent.service"}},
 	} {
 		if err := m.systemctlSuccess(paths, step.args...); err != nil {
-			if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasBinary, priorEnabled, priorActive); rb != "" {
+			if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasUnit, hasBinary, priorEnabledWord, priorActiveWord); rb != "" {
 				return fmt.Errorf("%s failed: %w%s", step.verb, err, rb)
 			}
 			return fmt.Errorf("%s failed: %w", step.verb, err)
