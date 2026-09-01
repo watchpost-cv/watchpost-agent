@@ -48,8 +48,19 @@ Install the per-user service before pairing:
 `install`/`upgrade`/`status`/`start`/`stop`/`restart`/`logs`/`uninstall`
 commands remain as compatibility aliases.
 
-Installation is idempotent and atomically replaces the installed executable,
-then restarts the service. The generated unit carries a versioned SHA-256
+Installation is a transaction. The prior managed unit and installed binary are
+preserved, prior systemd enablement and activity are inspected before mutation,
+and only exactly-recreatable states are accepted (`enabled`, `enabled-runtime`,
+`disabled` × `active`, `inactive`; masked/static/linked/generated/transient/
+failed/reloading states are refused before mutation — unmask or stop first).
+Rollback restores the exact prior enablement and activity states, distinguishing
+persistent from runtime enablement, and reproduces the prior unit and binary.
+A byte-identical unit and binary on an already enabled and active service is a
+genuine no-op; an unchanged installation that is inactive or disabled receives
+only the lifecycle steps needed, and a changed unit or binary is published
+transactionally and restarts the service. A failed fresh install is stopped and
+disabled while the unit is still loaded, then the unit and binary are removed
+and systemd is reloaded. The generated unit carries a versioned SHA-256
 managed-unit header, so a hand-modified or foreign unit is never overwritten
 or removed silently, and lifecycle commands refuse to operate on it. `status`
 reports enabled/running state, PID, version, listen address and a live health
@@ -80,10 +91,13 @@ uninstall` remain available even if it is missing. Changing it takes effect on
 permissions and refuses symlink, non-directory or group/world-writable paths.
 
 `service upgrade` (or `upgrade`) after replacing the downloaded executable
-atomically replaces the stable installed binary and restarts the service
-without changing installation identity, local configuration, queue or pairing.
-It preserves the installed listen address and environment file unless you pass
-an explicit `--listen`/`--env-file` override.
+publishes the new binary through the same transaction as install: the prior
+unit and binary are preserved for rollback, a byte-identical unit and binary on
+an already enabled and active service is a genuine no-op, and a changed binary
+is published transactionally and restarts the service. It does not change
+installation identity, local configuration, queue or pairing, and preserves the
+installed listen address and environment file unless you pass an explicit
+`--listen`/`--env-file` override.
 
 ### Persistence and lingering
 
