@@ -654,27 +654,45 @@ func (m Manager) rawState(paths Paths, verb string) (string, error) {
 }
 
 // restorableEnabledWord reports whether a prior is-enabled raw word can be
-// restored exactly. Enablement links (enabled, enabled-runtime, masked,
-// masked-runtime) and their absence (disabled, not-found) are restorable;
-// unit-file states that enable/disable cannot reproduce (static, alias,
-// indirect, generated, linked, linked-runtime, transient, unknown) are not.
+// restored exactly by the rollback sequence. Persistent/runtime enablement
+// links (enabled, enabled-runtime, masked, masked-runtime) and their absence
+// (disabled) are restorable; not-found is not (disabling a loaded unit yields
+// disabled, never not-found), and unit-file states that enable/disable cannot
+// reproduce (static, alias, indirect, generated, linked, linked-runtime,
+// transient, unknown) are not.
 func restorableEnabledWord(word string) bool {
 	switch word {
-	case "enabled", "enabled-runtime", "masked", "masked-runtime", "disabled", "not-found":
+	case "enabled", "enabled-runtime", "masked", "masked-runtime", "disabled":
 		return true
 	}
 	return false
 }
 
 // restorableActiveWord reports whether a prior is-active raw word can be
-// restored exactly. Running and stopped states are restorable; transient and
-// failed states cannot be reproduced deterministically.
+// restored exactly by the rollback sequence. Running and stopped are
+// restorable (restart/stop); dead, unknown and not-found are not, because stop
+// produces inactive rather than those words, and transient/failed states
+// cannot be reproduced deterministically.
 func restorableActiveWord(word string) bool {
 	switch word {
-	case "active", "inactive", "dead", "unknown", "not-found":
+	case "active", "inactive":
 		return true
 	}
 	return false
+}
+
+// restorablePriorState reports whether the enablement/active pair can be
+// reproduced exactly by the rollback ordering (enablement restored first, then
+// active state). A masked unit cannot be restarted, so masked + active is
+// refused before mutation.
+func restorablePriorState(enabledWord, activeWord string) bool {
+	if !restorableEnabledWord(enabledWord) || !restorableActiveWord(activeWord) {
+		return false
+	}
+	if (enabledWord == "masked" || enabledWord == "masked-runtime") && activeWord == "active" {
+		return false
+	}
+	return true
 }
 
 // enableRestoreArgs returns the systemctl call that reproduces a prior
@@ -888,6 +906,9 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 		}
 		if !restorableActiveWord(priorActiveWord) {
 			return fmt.Errorf("refusing to reinstall the service: prior active state %q cannot be restored exactly; stop or restart it first", priorActiveWord)
+		}
+		if !restorablePriorState(priorEnabledWord, priorActiveWord) {
+			return fmt.Errorf("refusing to reinstall the service: prior state %s+%s cannot be restored exactly; unmask it first", priorEnabledWord, priorActiveWord)
 		}
 	}
 	oldBinary, hasBinary := readFileIfPresent(paths.Binary)

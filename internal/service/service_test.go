@@ -1396,55 +1396,51 @@ func mustRead(t *testing.T, path string) []byte {
 	return b
 }
 
-func TestInstallRefusesNonRestorablePriorState(t *testing.T) {
-	enabledWords := []struct {
-		word       string
-		restorable bool
+func TestInstallRollbackMatrix(t *testing.T) {
+	pairs := []struct {
+		enabled, active string
+		restorable      bool
 	}{
-		{"enabled", true}, {"enabled-runtime", true}, {"masked", true}, {"masked-runtime", true},
-		{"disabled", true}, {"not-found", true},
-		{"static", false}, {"alias", false}, {"indirect", false}, {"generated", false},
-		{"linked", false}, {"linked-runtime", false}, {"transient", false}, {"unknown", false},
+		{"enabled", "active", true}, {"enabled", "inactive", true},
+		{"enabled-runtime", "active", true}, {"enabled-runtime", "inactive", true},
+		{"disabled", "active", true}, {"disabled", "inactive", true},
+		{"masked", "inactive", true}, {"masked-runtime", "inactive", true},
+		{"enabled", "dead", false}, {"enabled", "unknown", false}, {"enabled", "not-found", false},
+		{"enabled-runtime", "failed", false}, {"enabled-runtime", "reloading", false},
+		{"disabled", "refreshing", false}, {"disabled", "activating", false},
+		{"disabled", "deactivating", false}, {"disabled", "maintenance", false},
+		{"masked", "active", false}, {"masked-runtime", "active", false},
+		{"masked", "failed", false},
+		{"not-found", "active", false}, {"not-found", "inactive", false},
+		{"static", "active", false}, {"alias", "active", false}, {"indirect", "active", false},
+		{"generated", "active", false}, {"linked", "active", false},
+		{"linked-runtime", "active", false}, {"transient", "active", false},
+		{"unknown", "active", false},
 	}
-	activeWords := []struct {
-		word       string
-		restorable bool
-	}{
-		{"active", true}, {"inactive", true}, {"dead", true}, {"unknown", true}, {"not-found", true},
-		{"failed", false}, {"reloading", false}, {"refreshing", false}, {"activating", false},
-		{"deactivating", false}, {"maintenance", false},
-	}
-	for _, ew := range enabledWords {
-		for _, aw := range activeWords {
-			t.Run("enabled="+ew.word+"/active="+aw.word, func(t *testing.T) {
-				manager, fr, paths, source := testManager(t)
-				fs := newFakeSystemd(paths.Unit)
-				fs.runner(fr)
-				if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-					t.Fatal(err)
-				}
-				fs.setState(ew.word, aw.word)
-				fs.calls = nil
-				beforeUnit := mustRead(t, paths.Unit)
-				beforeBin := mustRead(t, paths.Binary)
+	for _, p := range pairs {
+		t.Run("enabled="+p.enabled+"/active="+p.active, func(t *testing.T) {
+			manager, fr, paths, source := testManager(t)
+			fs := newFakeSystemd(paths.Unit)
+			fs.runner(fr)
+			if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
+				t.Fatal(err)
+			}
+			priorUnit := mustRead(t, paths.Unit)
+			priorBin := mustRead(t, paths.Binary)
+			fs.setState(p.enabled, p.active)
+			fs.calls = nil
+			if !p.restorable {
 				if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
 					t.Fatal(err)
 				}
 				err := manager.Upgrade(source, paths, "127.0.0.1:9003", "")
-				restorable := ew.restorable && aw.restorable
-				if restorable {
-					if err != nil {
-						t.Fatalf("restorable prior state refused install: %v", err)
-					}
-					return
-				}
 				if err == nil {
-					t.Fatalf("non-restorable prior state (%q/%q) was not refused", ew.word, aw.word)
+					t.Fatalf("non-restorable pair (%q/%q) was not refused", p.enabled, p.active)
 				}
-				if string(beforeUnit) != string(mustRead(t, paths.Unit)) {
+				if string(priorUnit) != string(mustRead(t, paths.Unit)) {
 					t.Fatal("refusal changed the unit file")
 				}
-				if string(beforeBin) != string(mustRead(t, paths.Binary)) {
+				if string(priorBin) != string(mustRead(t, paths.Binary)) {
 					t.Fatal("refusal changed the binary")
 				}
 				for _, forbid := range []string{"daemon-reload", "enable ", "mask ", "disable ", "restart ", "start ", "stop "} {
@@ -1452,8 +1448,31 @@ func TestInstallRefusesNonRestorablePriorState(t *testing.T) {
 						t.Fatalf("refusal performed a lifecycle mutation (%q)\ncalls: %v", forbid, fs.calls)
 					}
 				}
-			})
-		}
+				return
+			}
+			if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			fs.failVerb = "restart"
+			err := manager.Upgrade(source, paths, "127.0.0.1:9004", "")
+			if err == nil {
+				t.Fatalf("install should fail at restart for restorable pair (%q/%q)", p.enabled, p.active)
+			}
+			if string(priorUnit) != string(mustRead(t, paths.Unit)) {
+				t.Fatal("rollback did not restore the prior unit bytes")
+			}
+			if string(priorBin) != string(mustRead(t, paths.Binary)) {
+				t.Fatal("rollback did not restore the prior binary")
+			}
+			ew, _, _ := manager.systemctl(paths, "is-enabled", "watchpost-agent.service")
+			aw, _, _ := manager.systemctl(paths, "is-active", "watchpost-agent.service")
+			if strings.TrimSpace(ew) != p.enabled || strings.TrimSpace(aw) != p.active {
+				t.Fatalf("rollback final raw state %q/%q want %q/%q", ew, aw, p.enabled, p.active)
+			}
+			if fs.enabled != p.enabled || fs.active != p.active {
+				t.Fatalf("rollback final model state %q/%q want %q/%q", fs.enabled, fs.active, p.enabled, p.active)
+			}
+		})
 	}
 }
 
