@@ -85,6 +85,25 @@ without changing installation identity, local configuration, queue or pairing.
 It preserves the installed listen address and environment file unless you pass
 an explicit `--listen`/`--env-file` override.
 
+### Persistence and lingering
+
+Once installed, the service runs independently of the terminal that launched
+it: closing the terminal does not stop it. A systemd user service is tied to
+your OS user's user manager, so it normally starts when that user manager
+starts (for example at your first login after boot). Unattended boot or
+continuing to run after you log out may require lingering for your user:
+
+```sh
+loginctl show-user "$USER" -p Linger
+loginctl enable-linger "$USER"   # explicit host-level choice
+```
+
+Enable lingering deliberately: it keeps your user's services running without a
+login session and changes what runs unattended. The unit records the absolute
+path of the `watchpost-agent` executable at install time (in
+`~/.local/lib/watchpost-agent/`); moving or deleting that binary will break the
+service.
+
 `--system` is **not currently supported**: the previous system-wide mode ran
 the agent's web service (setup, login, configuration, pairing, rotation, reset
 and account-management endpoints) as root, which is not an acceptable default.

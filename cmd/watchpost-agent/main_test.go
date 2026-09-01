@@ -2,7 +2,9 @@ package main
 
 import (
 	"net"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -20,6 +22,24 @@ func TestUnitMatchesForegroundConfig(t *testing.T) {
 			t.Fatalf("unit does not match foreground defaults (%s):\n%s", want, unit)
 		}
 	}
+}
+
+func TestGoDirectiveAllowsToolchainSelection(t *testing.T) {
+	// A patch-level `go` directive (go 1.25.0) lets the Go toolchain manager
+	// auto-select a matching toolchain, whereas a bare `go 1.25` may attempt to
+	// download an unavailable toolchain on older hosts.
+	for _, candidate := range []string{"go.mod", "../../go.mod"} {
+		data, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		re := regexp.MustCompile(`(?m)^go (\d+\.\d+\.\d+)\s*$`)
+		if m := re.FindStringSubmatch(string(data)); m != nil {
+			return
+		}
+		t.Fatalf("go directive must be a full patch version (go 1.25.0):\n%s", data)
+	}
+	t.Fatal("could not locate go.mod")
 }
 
 func TestServiceNamespaceDispatch(t *testing.T) {

@@ -615,10 +615,33 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(name, path)
 }
 
-// rollbackInstall restores the prior unit and binary after a failed
-// install/upgrade, removing them for a fresh install. It returns an
-// explanatory string when rollback itself fails, and runs a best-effort reload.
-func (m Manager) rollbackInstall(paths Paths, oldUnit, oldBinary []byte, hadBinary bool) string {
+// systemctlTolerantMissing runs a systemctl verb treating "unit not loaded /
+// not found" results as success, which is expected when rolling back a failed
+// fresh install whose unit has already been removed.
+func (m Manager) systemctlTolerantMissing(paths Paths, args ...string) error {
+	out, code, err := m.systemctl(paths, args...)
+	if err != nil {
+		low := strings.ToLower(err.Error())
+		if strings.Contains(low, "not loaded") || strings.Contains(low, "not found") || strings.Contains(low, "no such file") {
+			return nil
+		}
+		return err
+	}
+	if code != 0 {
+		low := strings.ToLower(out)
+		if strings.Contains(low, "not loaded") || strings.Contains(low, "not found") || strings.Contains(low, "no such file") {
+			return nil
+		}
+		return fmt.Errorf("systemctl %s exited %d: %s", strings.Join(args, " "), code, bounded(strings.TrimSpace(out)))
+	}
+	return nil
+}
+
+// rollbackInstall restores the prior unit, binary and systemd enabled/active
+// state after a failed install/upgrade, removing them for a fresh install. It
+// returns an explanatory string when rollback itself fails so callers never
+// claim a full rollback when only the files were restored.
+func (m Manager) rollbackInstall(paths Paths, oldUnit, oldBinary []byte, hadBinary bool, priorEnabled, priorActive svcState) string {
 	var errs []string
 	if oldUnit != nil {
 		if err := writeFileAtomic(paths.Unit, oldUnit, 0644); err != nil {
@@ -634,10 +657,26 @@ func (m Manager) rollbackInstall(paths Paths, oldUnit, oldBinary []byte, hadBina
 	} else if err := os.Remove(paths.Binary); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, fmt.Sprintf("remove new binary: %v", err))
 	}
+	if err := m.systemctlSuccess(paths, "daemon-reload"); err != nil {
+		errs = append(errs, fmt.Sprintf("reload systemd: %v", err))
+	}
+	if priorEnabled == stateEnabled {
+		if err := m.systemctlSuccess(paths, "enable", "watchpost-agent.service"); err != nil {
+			errs = append(errs, fmt.Sprintf("restore enabled: %v", err))
+		}
+	} else if err := m.systemctlTolerantMissing(paths, "disable", "watchpost-agent.service"); err != nil {
+		errs = append(errs, fmt.Sprintf("restore disabled: %v", err))
+	}
+	if priorActive == stateActive {
+		if err := m.systemctlSuccess(paths, "restart", "watchpost-agent.service"); err != nil {
+			errs = append(errs, fmt.Sprintf("restore active: %v", err))
+		}
+	} else if err := m.systemctlTolerantMissing(paths, "stop", "watchpost-agent.service"); err != nil {
+		errs = append(errs, fmt.Sprintf("restore inactive: %v", err))
+	}
 	if len(errs) > 0 {
 		return "; rollback incomplete: " + strings.Join(errs, "; ")
 	}
-	_ = m.systemctlSuccess(paths, "daemon-reload")
 	return ""
 }
 
@@ -752,11 +791,24 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 			return err
 		}
 	}
-	// A repeat install/upgrade must not overwrite a foreign or modified unit.
+	// A repeat install/upgrade must not overwrite a foreign or modified unit,
+	// and the prior enabled/active state is snapshotted so a failed operation
+	// can restore the previous systemd lifecycle state.
 	oldUnit, hasUnit := readFileIfPresent(paths.Unit)
+	priorEnabled := stateNotEnabled
+	priorActive := stateInactive
 	if hasUnit {
 		if _, err := readManagedUnit(paths.Unit); err != nil {
 			return fmt.Errorf("refusing to overwrite the existing unit: %w", err)
+		}
+		var err error
+		priorEnabled, err = m.queryState(paths, "is-enabled")
+		if err != nil {
+			return fmt.Errorf("cannot determine the prior enablement state: %w", err)
+		}
+		priorActive, err = m.queryState(paths, "is-active")
+		if err != nil {
+			return fmt.Errorf("cannot determine the prior service state: %w", err)
 		}
 	}
 	oldBinary, hasBinary := readFileIfPresent(paths.Binary)
@@ -771,7 +823,7 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 		return err
 	}
 	if err := os.Rename(stagedBin, paths.Binary); err != nil {
-		if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasBinary); rb != "" {
+		if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasBinary, priorEnabled, priorActive); rb != "" {
 			return fmt.Errorf("cannot publish the binary: %w%s", err, rb)
 		}
 		return fmt.Errorf("cannot publish the binary: %w", err)
@@ -785,7 +837,7 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 		{"restart", []string{"restart", "watchpost-agent.service"}},
 	} {
 		if err := m.systemctlSuccess(paths, step.args...); err != nil {
-			if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasBinary); rb != "" {
+			if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasBinary, priorEnabled, priorActive); rb != "" {
 				return fmt.Errorf("%s failed: %w%s", step.verb, err, rb)
 			}
 			return fmt.Errorf("%s failed: %w", step.verb, err)

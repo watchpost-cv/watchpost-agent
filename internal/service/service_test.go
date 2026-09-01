@@ -188,6 +188,15 @@ func TestUnitAndIntegrity(t *testing.T) {
 
 func TestInstallAndUpgrade(t *testing.T) {
 	manager, fr, paths, source := testManager(t)
+	fr.handler = func(name string, args ...string) (string, int, error) {
+		switch {
+		case fr.contains(args, "is-active"):
+			return "inactive", 3, nil
+		case fr.contains(args, "is-enabled"):
+			return "disabled", 1, nil
+		}
+		return "", 0, nil
+	}
 	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
 		t.Fatalf("install: %v", err)
 	}
@@ -882,6 +891,15 @@ func TestEnvFile(t *testing.T) {
 
 func TestUpgradePreservesInstalledConfig(t *testing.T) {
 	manager, fr, paths, source := testManager(t)
+	fr.handler = func(name string, args ...string) (string, int, error) {
+		switch {
+		case fr.contains(args, "is-active"):
+			return "inactive", 3, nil
+		case fr.contains(args, "is-enabled"):
+			return "disabled", 1, nil
+		}
+		return "", 0, nil
+	}
 	dir := t.TempDir()
 	env := filepath.Join(dir, "agent.env")
 	if err := os.WriteFile(env, []byte("WATCHPOST_AGENT_SECURE_COOKIES=true\n"), 0600); err != nil {
@@ -1000,6 +1018,23 @@ func TestFreshInstallPreparesDataDir(t *testing.T) {
 	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err == nil {
 		t.Fatal("symlink data dir accepted")
 	}
+	// A group/world-writable data dir must be refused regardless of umask.
+	world := filepath.Join(t.TempDir(), "world")
+	if err := os.MkdirAll(world, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(world, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(world); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o777 {
+		t.Fatalf("expected 0777 data dir, got %v", info.Mode().Perm())
+	}
+	paths.DataDir = world
+	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err == nil {
+		t.Fatal("world-writable data dir accepted")
+	}
 }
 
 func TestEnvFileRevalidatedOnStartRestart(t *testing.T) {
@@ -1055,13 +1090,20 @@ func TestUpgradeTransaction(t *testing.T) {
 		}
 		fr.calls = nil
 		fr.handler = func(name string, args ...string) (string, int, error) {
-			if fr.contains(args, "restart") {
+			switch {
+			case fr.contains(args, "is-active"):
+				return "active", 0, nil
+			case fr.contains(args, "is-enabled"):
+				return "enabled", 0, nil
+			case fr.contains(args, "restart"):
 				return "Failed", 1, nil
 			}
 			return "", 0, nil
 		}
 		if err := manager.Upgrade(source, paths, "127.0.0.1:9001", ""); err == nil {
 			t.Fatal("upgrade should fail")
+		} else if !strings.Contains(err.Error(), "rollback incomplete") {
+			t.Fatalf("rollback incompleteness (restore active) must be surfaced, got: %v", err)
 		}
 		gotUnit, _ := os.ReadFile(paths.Unit)
 		gotBinary, _ := os.ReadFile(paths.Binary)
@@ -1071,6 +1113,10 @@ func TestUpgradeTransaction(t *testing.T) {
 		meta, _, _ := manager.ExistingMeta(paths)
 		if meta.Listen != "127.0.0.1:9001" {
 			t.Fatalf("metadata not rolled back: %q", meta.Listen)
+		}
+		joined := strings.Join(fr.calls, "\n")
+		if !strings.Contains(joined, "systemctl --user enable watchpost-agent.service") {
+			t.Fatal("rollback did not attempt to restore the enabled state")
 		}
 		fr.handler = nil
 	})
