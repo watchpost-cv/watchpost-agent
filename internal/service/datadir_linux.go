@@ -221,23 +221,28 @@ func openDataParentReal(leafPath string) (int, error) {
 	return fd, nil
 }
 
-// dataParentConsistentReal reports whether the pathname leafPath still resolves
-// to the retained parent descriptor, detecting an ancestor swap between
-// inspection and establishment.
+// dataParentConsistentReal reports whether the current parent pathname still has
+// a symlink-free component-by-component walk to the exact retained parent
+// descriptor. It re-walks the pathname with O_DIRECTORY|O_NOFOLLOW (refusing any
+// newly introduced symlink, including one that resolves back to the same
+// directory), then compares the freshly opened descriptor's dev+ino with the
+// retained descriptor. The fresh descriptor is evidence only and is never used
+// for mutation.
 func dataParentConsistentReal(fd int, leafPath string) bool {
-	var fdStat unix.Stat_t
-	if e := unix.Fstat(fd, &fdStat); e != nil {
-		return false
-	}
-	resolved, e := filepath.EvalSymlinks(filepath.Dir(leafPath))
+	parent := filepath.Dir(leafPath)
+	nf, e := openDataParentReal(parent)
 	if e != nil {
 		return false
 	}
-	var st unix.Stat_t
-	if e := unix.Stat(resolved, &st); e != nil {
+	defer closeFdReal(nf)
+	var a, b unix.Stat_t
+	if e := unix.Fstat(fd, &a); e != nil {
 		return false
 	}
-	return st.Dev == fdStat.Dev && st.Ino == fdStat.Ino
+	if e := unix.Fstat(nf, &b); e != nil {
+		return false
+	}
+	return a.Dev == b.Dev && a.Ino == b.Ino
 }
 
 // parentSafeReal validates the final parent used for service-data creation: it

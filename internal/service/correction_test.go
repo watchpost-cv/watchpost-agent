@@ -830,3 +830,47 @@ func TestAgentDataDirParentSafety(t *testing.T) {
 		t.Fatalf("non-root parent install touched systemctl: %v", r.log)
 	}
 }
+
+// TestAgentDataDirParentPathnameSymlinkSwapRefused proves the parent-consistency
+// check re-walks the current pathname with O_NOFOLLOW instead of following newly
+// introduced symlinks: renaming the parent between inspection and establishment
+// and replacing its pathname with a symlink pointing back to the renamed
+// original is refused before any leaf/binary/unit/systemd mutation.
+func TestAgentDataDirParentPathnameSymlinkSwapRefused(t *testing.T) {
+	m, r, paths := fakeStrictManager(t)
+	useRealDataDirSeams(t)
+	simulateSafeParent(t)
+	parent := t.TempDir()
+	p := paths
+	p.DataDir = filepath.Join(parent, "agent-data")
+	// Between inspection (parent descriptor retained) and establishment the
+	// parent is renamed away and its pathname replaced with a symlink pointing
+	// back to the renamed original.
+	ensureAccount = func() error {
+		if e := os.Rename(parent, parent+"-original"); e != nil {
+			return e
+		}
+		return os.Symlink(parent+"-original", parent)
+	}
+	t.Cleanup(func() { os.RemoveAll(parent + "-original"); os.Remove(parent) })
+	binBefore := mustRead(t, paths.Binary)
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if e := m.Install(exe, p, DefaultListen, ""); e == nil {
+		t.Fatal("install proceeded after the parent pathname became a symlink")
+	} else if !strings.Contains(e.Error(), "parent") {
+		t.Fatalf("refusal did not identify the parent pathname: %v", e)
+	}
+	if _, e := os.Stat(filepath.Join(parent+"-original", "agent-data")); !os.IsNotExist(e) {
+		t.Fatal("leaf created through the symlinked parent pathname")
+	}
+	if got := mustRead(t, paths.Binary); !bytes.Equal(got, binBefore) {
+		t.Fatal("binary mutated despite the parent-pathname refusal")
+	}
+	if _, e := os.Stat(paths.Unit); !os.IsNotExist(e) {
+		t.Fatal("unit written despite the parent-pathname refusal")
+	}
+	if hasMutatingSystemctl(r.log) {
+		t.Fatalf("systemctl mutated despite the parent-pathname refusal: %v", r.log)
+	}
+}
