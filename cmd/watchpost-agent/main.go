@@ -43,8 +43,12 @@ func main() {
 // failure, 2 usage error (canonical Web Fleet convention).
 func runServiceCommand(args []string) int {
 	cmd := "status"
+	// Flags that consume a following value are recorded as pairs so their value
+	// is never misclassified as a positional argument.
+	valueFlags := map[string]bool{"--host": true, "--port": true, "--listen": true, "--env-file": true}
 	var flags, positional []string
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a != "" && !strings.HasPrefix(a, "-") {
 			if cmd == "status" && len(positional) == 0 {
 				cmd = a
@@ -54,6 +58,10 @@ func runServiceCommand(args []string) int {
 			continue
 		}
 		flags = append(flags, a)
+		if valueFlags[a] && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
 	}
 	usage := func(msg string) int {
 		fmt.Fprintf(os.Stderr, "watchpost-agent service %s: %s\n", cmd, msg)
@@ -64,6 +72,18 @@ func runServiceCommand(args []string) int {
 		case "install", "upgrade":
 			for i := 0; i < len(flags); i++ {
 				switch flags[i] {
+				case "--host":
+					if i+1 < len(flags) {
+						i++
+					} else {
+						return usage("--host requires an address")
+					}
+				case "--port":
+					if i+1 < len(flags) {
+						i++
+					} else {
+						return usage("--port requires a number")
+					}
 				case "--listen":
 					if i+1 < len(flags) {
 						i++
@@ -99,32 +119,87 @@ func runServiceCommand(args []string) int {
 			fmt.Fprintln(os.Stderr, "watchpost-agent:", err)
 			return 1
 		}
-		listen, envfile := service.DefaultListen, ""
-		visited := map[string]bool{}
+		// Resolve the requested listener from the explicit CLI flags and the
+		// environment (CLI > environment > default). Only install/upgrade
+		// resolve the listener, so a malformed WATCHPOST_AGENT_HOST/PORT in the
+		// shell can never break start/stop/restart/status/logs/uninstall.
+		listen, host, port, envfile := "", "", "", ""
+		hostSet, portSet, listenSet, envfileSet := false, false, false, false
 		for i := 0; i < len(flags); i++ {
 			switch flags[i] {
+			case "--host":
+				if i+1 < len(flags) {
+					i++
+					host = flags[i]
+					hostSet = true
+				}
+			case "--port":
+				if i+1 < len(flags) {
+					i++
+					port = flags[i]
+					portSet = true
+				}
 			case "--listen":
 				if i+1 < len(flags) {
 					i++
 					listen = flags[i]
-					visited["listen"] = true
+					listenSet = true
 				}
 			case "--env-file":
 				if i+1 < len(flags) {
 					i++
 					envfile = flags[i]
-					visited["env-file"] = true
+					envfileSet = true
 				}
 			}
 		}
+		addr, err := resolveListener(host, port, listen, hostSet, portSet, listenSet)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
+			return 2
+		}
+		if err := validateNoControl(addr, "listen"); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
+			return 2
+		}
+		// Resolve the recorded listener and its mode (explicit host/port vs
+		// legacy --listen/WATCHPOST_AGENT_LISTEN bootstrap) for the generated
+		// unit.
+		legacy := listenSet
+		if !legacy {
+			if _, hasListen := os.LookupEnv("WATCHPOST_AGENT_LISTEN"); hasListen && !hostSet && !portSet {
+				legacy = true
+			}
+		}
+		explicit := hostSet || portSet || listenSet
+		for _, key := range []string{"WATCHPOST_AGENT_HOST", "WATCHPOST_AGENT_PORT", "WATCHPOST_AGENT_LISTEN"} {
+			if _, ok := os.LookupEnv(key); ok {
+				explicit = true
+			}
+		}
 		manager := service.New()
-		if meta, ok, err := manager.ExistingMeta(paths); err != nil {
-			fmt.Fprintln(os.Stderr, "watchpost-agent:", err)
+		var opts service.Options
+		if explicit {
+			opts, err = installOptions(addr, legacy, envfile)
+		} else if meta, ok, metaErr := manager.ExistingMeta(paths); metaErr != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent:", metaErr)
 			return 1
 		} else if ok {
-			listen, envfile = service.PreserveInstallValues(meta, visited["listen"], listen, visited["env-file"], envfile)
+			// No explicit listener selection: preserve the existing recorded
+			// listener in its recorded form so a bare reinstall or upgrade
+			// never silently changes the runtime listener.
+			if !envfileSet && meta.EnvFile != "" {
+				envfile = meta.EnvFile
+			}
+			opts = service.OptionsFromMeta(meta, envfile)
+		} else {
+			opts, err = installOptions(addr, false, envfile)
 		}
-		if err := manager.Install(executable, paths, listen, envfile); err != nil {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
+			return 2
+		}
+		if err := manager.InstallOptions(executable, paths, opts); err != nil {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
 			return 1
 		}
@@ -200,6 +275,21 @@ func runServiceCommand(args []string) int {
 	}
 }
 
+// installOptions builds the service.Options recorded in a newly installed unit
+// from the resolved listener. Legacy bootstrap units keep the single-address
+// --listen form; explicit host/port units are split back into --host/--port so
+// their recorded listener is the runtime listener across restart and reboot.
+func installOptions(addr string, legacy bool, envfile string) (service.Options, error) {
+	if legacy {
+		return service.Options{Listen: addr, EnvFile: envfile}, nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return service.Options{}, fmt.Errorf("cannot split resolved listener %q: %w", addr, err)
+	}
+	return service.Options{Host: host, Port: port, EnvFile: envfile}, nil
+}
+
 func lifecycleErr(m service.Manager, paths service.Paths, verb string) error {
 	switch verb {
 	case "start":
@@ -221,7 +311,9 @@ func run(arguments []string) error {
 		return localCommand(arguments[0], arguments[1:])
 	}
 	flags := flag.NewFlagSet("watchpost-agent", flag.ContinueOnError)
-	listen := flags.String("listen", "127.0.0.1:8090", "local agent UI address")
+	host := flags.String("host", "", "HTTP bind host (default 127.0.0.1; WATCHPOST_AGENT_HOST overrides, CLI wins)")
+	port := flags.String("port", "", "HTTP bind port, 1-65535 (default 7335; WATCHPOST_AGENT_PORT overrides, CLI wins)")
+	listen := flags.String("listen", "", "local agent UI address (legacy; alternative to --host/--port, honors WATCHPOST_AGENT_LISTEN)")
 	dataDir := flags.String("data-dir", defaultDataDir(), "private agent data directory")
 	showVersion := flags.Bool("version", false, "print version")
 	if err := flags.Parse(arguments); err != nil {
@@ -234,11 +326,19 @@ func run(arguments []string) error {
 		fmt.Println(version)
 		return nil
 	}
+	addr, err := resolveListener(*host, *port, *listen, flagProvided(flags, "host"), flagProvided(flags, "port"), flagProvided(flags, "listen"))
+	if err != nil {
+		return err
+	}
+	// The resolved listener is the runtime listener. Watchpost Agent has no
+	// durable config file: explicit --host/--port selection (CLI or
+	// WATCHPOST_AGENT_HOST/WATCHPOST_AGENT_PORT) and bare or legacy --listen
+	// invocations all resolve to the same canonical address here.
 	store, err := state.Open(filepath.Join(*dataDir, "agent.json"))
 	if err != nil {
 		return err
 	}
-	options, err := appOptions(*listen)
+	options, err := appOptions(addr)
 	if err != nil {
 		return err
 	}
@@ -249,7 +349,7 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: *listen, Handler: app.New(store, version, public, options).Handler(), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Addr: addr, Handler: app.New(store, version, public, options).Handler(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go deliveryLoop(ctx, store)
@@ -259,12 +359,12 @@ func run(arguments []string) error {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	fmt.Printf("Watchpost Agent %s\nLocal interface: http://%s\n", version, *listen)
+	fmt.Printf("Watchpost Agent %s\nLocal interface: http://%s\n", version, addr)
 	err = server.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil
 	}
-	return err
+	return fmt.Errorf("%v (listener: %s)", err, addr)
 }
 
 func deliveryLoop(ctx context.Context, store *state.Store) {

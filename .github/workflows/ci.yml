@@ -48,7 +48,7 @@ jobs:
           DATA=/var/lib/watchpost-agent
           wait_healthz() {
             for _ in $(seq 1 40); do
-              if curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+              if curl -fsS http://127.0.0.1:7335/healthz >/dev/null 2>&1; then
                 return 0
               fi
               sleep 0.5
@@ -107,7 +107,7 @@ jobs:
           set -euxo pipefail
           wait_healthz() {
             for _ in $(seq 1 40); do
-              if curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+              if curl -fsS http://127.0.0.1:7335/healthz >/dev/null 2>&1; then
                 return 0
               fi
               sleep 0.5

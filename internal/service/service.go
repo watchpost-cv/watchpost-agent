@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -288,14 +289,55 @@ const ServiceUser = "watchpost-agent"
 const ServiceGroup = "watchpost-agent"
 
 // DefaultListen is the canonical loopback listen address embedded in the unit.
-const DefaultListen = "127.0.0.1:8090"
+const DefaultListen = "127.0.0.1:7335"
+
+// Options describes the listener and unit settings recorded by service install.
+// Legacy bootstrap units set Listen (single address, recorded as --listen);
+// explicit host/port units set Host and Port (recorded as canonical --host and
+// --port in ExecStart).
+type Options struct {
+	Host    string
+	Port    string
+	Listen  string
+	EnvFile string
+}
+
+// listenMode is the unit metadata marker distinguishing an explicit host/port
+// unit from a legacy bootstrap unit.
+const (
+	listenModeExplicit  = "explicit"
+	listenModeBootstrap = "bootstrap"
+)
+
+// listener returns the canonical listen address recorded in the unit metadata:
+// the legacy single address when set, otherwise the trimmed host/port pair
+// joined safely (so IPv6 hosts are bracketed). Values are canonicalized before
+// being written so surrounding whitespace can never leak into the unit.
+func (o Options) listener() string {
+	if o.Listen != "" {
+		return o.Listen
+	}
+	return net.JoinHostPort(strings.TrimSpace(o.Host), strings.TrimSpace(o.Port))
+}
+
+// mode reports the unit listen mode recorded in the metadata marker: explicit
+// host/port units versus legacy bootstrap units.
+func (o Options) mode() string {
+	if o.Listen != "" {
+		return listenModeBootstrap
+	}
+	return listenModeExplicit
+}
 
 // DefaultEnvFile is the root-protected environment file for protected
 // WATCHPOST_AGENT_* configuration.
 const DefaultEnvFile = "/etc/watchpost-agent/watchpost-agent.env"
 
-// renderUnitBody renders the systemd directives (no managed header).
-func renderUnitBody(paths Paths, listen, envfile string) string {
+// renderUnitBody renders the systemd directives (no managed header). Explicit
+// host/port units record canonical --host/--port so their recorded listener is
+// the runtime listener; legacy bootstrap units keep the single-address --listen
+// form.
+func renderUnitBody(paths Paths, opts Options) string {
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
 	b.WriteString("Description=Watchpost Agent\n")
@@ -306,7 +348,12 @@ func renderUnitBody(paths Paths, listen, envfile string) string {
 	b.WriteString("User=" + ServiceUser + "\n")
 	b.WriteString("Group=" + ServiceGroup + "\n")
 	b.WriteString("ExecStart=" + systemdQuote(paths.Binary))
-	b.WriteString(" " + systemdQuote("--listen") + " " + systemdQuote(listen))
+	if opts.Listen != "" {
+		b.WriteString(" " + systemdQuote("--listen") + " " + systemdQuote(opts.Listen))
+	} else {
+		b.WriteString(" " + systemdQuote("--host") + " " + systemdQuote(strings.TrimSpace(opts.Host)))
+		b.WriteString(" " + systemdQuote("--port") + " " + systemdQuote(strings.TrimSpace(opts.Port)))
+	}
 	b.WriteString(" " + systemdQuote("--data-dir") + " " + systemdQuote(paths.DataDir))
 	b.WriteString("\n")
 	b.WriteString("Restart=on-failure\n")
@@ -318,39 +365,54 @@ func renderUnitBody(paths Paths, listen, envfile string) string {
 	b.WriteString("ProtectHome=true\n")
 	b.WriteString("ReadWritePaths=" + systemdQuote(paths.DataDir) + "\n")
 	b.WriteString("Environment=HOME=%h\n")
-	if envfile != "" {
-		b.WriteString("EnvironmentFile=" + systemdQuote(envfile) + "\n")
+	if opts.EnvFile != "" {
+		b.WriteString("EnvironmentFile=" + systemdQuote(opts.EnvFile) + "\n")
 	}
 	b.WriteString("\n[Install]\n")
 	b.WriteString("WantedBy=multi-user.target\n")
 	return b.String()
 }
 
-// Unit renders the full managed unit: a marker line, a versioned integrity
+// buildUnit renders the full managed unit: a marker line, a versioned integrity
 // header carrying the SHA-256 of the managed content below it, the runtime
-// metadata (listen/health/envfile) used by status, and the body.
-func Unit(paths Paths, listen, envfile string) string {
-	meta := "# watchpost-agent-listen: " + listen + "\n"
-	if envfile != "" {
-		meta += "# watchpost-agent-envfile: " + envfile + "\n"
+// metadata (listen/listen-mode/health/envfile) used by status, and the body.
+func buildUnit(paths Paths, opts Options) string {
+	meta := "# watchpost-agent-listen: " + opts.listener() + "\n"
+	meta += "# watchpost-agent-listen-mode: " + opts.mode() + "\n"
+	if opts.EnvFile != "" {
+		meta += "# watchpost-agent-envfile: " + opts.EnvFile + "\n"
 	}
 	meta += "# watchpost-agent-health: " + healthPath + "\n"
-	content := meta + renderUnitBody(paths, listen, envfile)
+	content := meta + renderUnitBody(paths, opts)
 	sum := sha256.Sum256([]byte(content))
 	header := unitMarker + "\n" + managedPrefix + "v1 sha256=" + hex.EncodeToString(sum[:]) + "\n"
 	return header + content
 }
 
+// Unit renders the full managed unit for a legacy bootstrap listen address
+// (exported for tests and legacy compatibility).
+func Unit(paths Paths, listen, envfile string) string {
+	return buildUnit(paths, Options{Listen: listen, EnvFile: envfile})
+}
+
+// UnitOptions renders the full managed unit for explicit host/port options
+// (exported for tests).
+func UnitOptions(paths Paths, opts Options) string {
+	return buildUnit(paths, opts)
+}
+
 type unitMeta struct {
-	listen  string
-	envfile string
-	health  string
+	listen     string
+	listenMode string
+	envfile    string
+	health     string
 }
 
 // Meta is the exported view of a managed unit's integrity-checked metadata.
 type Meta struct {
-	Listen  string
-	EnvFile string
+	Listen     string
+	ListenMode string
+	EnvFile    string
 }
 
 // ExistingMeta returns the installed managed unit's integrity-checked metadata, or
@@ -364,20 +426,20 @@ func (m Manager) ExistingMeta(paths Paths) (Meta, bool, error) {
 		}
 		return Meta{}, false, fmt.Errorf("existing unit at %s is not valid: %w", paths.Unit, err)
 	}
-	return Meta{Listen: meta.listen, EnvFile: meta.envfile}, true, nil
+	return Meta{Listen: meta.listen, ListenMode: meta.listenMode, EnvFile: meta.envfile}, true, nil
 }
 
-// PreserveInstallValues fills values the operator did not explicitly set from
-// the existing managed metadata, so install/upgrade never silently replace
-// installed configuration with CLI defaults.
-func PreserveInstallValues(existing Meta, listenSet bool, listen string, envfileSet bool, envfile string) (string, string) {
-	if !listenSet && existing.Listen != "" {
-		listen = existing.Listen
+// OptionsFromMeta reconstructs the recorded options from an existing managed
+// unit's metadata, preserving the recorded listener in its recorded form
+// (explicit host/port vs legacy --listen) so a bare reinstall or upgrade never
+// silently changes the runtime listener. envfile overrides the recorded value.
+func OptionsFromMeta(meta Meta, envfile string) Options {
+	if meta.ListenMode == listenModeExplicit {
+		if host, port, err := net.SplitHostPort(meta.Listen); err == nil {
+			return Options{Host: host, Port: port, EnvFile: envfile}
+		}
 	}
-	if !envfileSet && existing.EnvFile != "" {
-		envfile = existing.EnvFile
-	}
-	return listen, envfile
+	return Options{Listen: meta.Listen, EnvFile: envfile}
 }
 
 // readManagedUnitFile reads a unit file path and parses its managed content.
@@ -412,8 +474,8 @@ func readManagedUnit(content string) (unitMeta, error) {
 	if hex.EncodeToString(sum[:]) != sm[1] {
 		return unitMeta{}, errModified
 	}
-	meta := unitMeta{}
-	listenSeen, envfileSeen, healthSeen := 0, 0, 0
+	meta := unitMeta{listenMode: listenModeBootstrap}
+	listenSeen, envfileSeen, healthSeen, modeSeen := 0, 0, 0, 0
 	for _, ln := range lines[2:] {
 		switch {
 		case strings.HasPrefix(ln, "# watchpost-agent-listen: "):
@@ -422,6 +484,12 @@ func readManagedUnit(content string) (unitMeta, error) {
 				return unitMeta{}, errMalformed
 			}
 			meta.listen = strings.TrimSpace(strings.TrimPrefix(ln, "# watchpost-agent-listen: "))
+		case strings.HasPrefix(ln, "# watchpost-agent-listen-mode: "):
+			modeSeen++
+			if modeSeen > 1 {
+				return unitMeta{}, errMalformed
+			}
+			meta.listenMode = strings.TrimSpace(strings.TrimPrefix(ln, "# watchpost-agent-listen-mode: "))
 		case strings.HasPrefix(ln, "# watchpost-agent-envfile: "):
 			envfileSeen++
 			if envfileSeen > 1 {
@@ -440,6 +508,11 @@ func readManagedUnit(content string) (unitMeta, error) {
 		return unitMeta{}, errMalformed
 	}
 	if envfileSeen > 1 {
+		return unitMeta{}, errMalformed
+	}
+	// Old units predating the mode marker default to bootstrap: their recorded
+	// listener remains a bootstrap/durable value, matching legacy behaviour.
+	if meta.listenMode != listenModeExplicit && meta.listenMode != listenModeBootstrap {
 		return unitMeta{}, errMalformed
 	}
 	if meta.health != healthPath {
@@ -606,17 +679,29 @@ func ensureServiceAccount() error {
 // ensureAccount is a test seam for service-account creation.
 var ensureAccount = func() error { return ensureServiceAccount() }
 
-// Install publishes a new unit and binary as a failure-atomic transaction. A
-// partial failure restores the prior unit, enablement, active state and binary,
-// and the returned error combines the original failure with any rollback
-// failure.
+// Install publishes a new unit and binary as a failure-atomic transaction with
+// legacy single-address listen options (bootstrap mode). It is retained for
+// compatibility; InstallOptions is the canonical entry point.
 func (m Manager) Install(source string, paths Paths, listen, envfile string) (retErr error) {
+	return m.InstallOptions(source, paths, Options{Listen: listen, EnvFile: envfile})
+}
+
+// InstallOptions publishes a new unit and binary as a failure-atomic
+// transaction. Explicit host/port units record canonical --host/--port so their
+// recorded listener is the runtime listener; legacy bootstrap units record the
+// single-address --listen form. A partial failure restores the prior unit,
+// enablement, active state and binary, and the returned error combines the
+// original failure with any rollback failure.
+func (m Manager) InstallOptions(source string, paths Paths, o Options) (retErr error) {
+	if o.Listen == "" && o.Host == "" && o.Port == "" {
+		o.Listen = DefaultListen
+	}
 	// Non-mutating preflight runs first so a foreign/tampered unit, unsupported
 	// state, state-query failure, invalid executable, invalid environment file
 	// or unacceptable data directory is rejected with zero account, mkdir,
 	// chmod, chown, binary, unit or lifecycle mutation.
 	for _, v := range []struct{ val, name string }{
-		{listen, "listen"}, {paths.DataDir, "data-dir"},
+		{o.listener(), "listen"}, {paths.DataDir, "data-dir"},
 	} {
 		if err := validateNoControl(v.val, v.name); err != nil {
 			return err
@@ -628,8 +713,8 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 	if err := validateDataDirPath(paths.DataDir); err != nil {
 		return err
 	}
-	if envfile != "" {
-		if err := validateEnvFile(envfile); err != nil {
+	if o.EnvFile != "" {
+		if err := validateEnvFile(o.EnvFile); err != nil {
 			return err
 		}
 	}
@@ -637,7 +722,7 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 		return errors.New("systemctl not found; is systemd installed?")
 	}
 	// Read and authenticate the existing managed unit (non-mutating).
-	unit := Unit(paths, listen, envfile)
+	unit := buildUnit(paths, o)
 	oldUnit, hasUnit := readFileIfPresent(paths.Unit)
 	priorEnabled, priorActive := "", ""
 	if hasUnit {
@@ -861,6 +946,11 @@ func (m Manager) Status(out io.Writer, paths Paths, version string) error {
 	fmt.Fprintf(out, "pid:     %s\n", strings.TrimSpace(pid))
 	fmt.Fprintf(out, "user:    %s\n", ServiceUser)
 	fmt.Fprintf(out, "version: %s\n", version)
+	// The actual runtime listener: explicit host/port units record an
+	// authoritative --host/--port listener in ExecStart; legacy bootstrap units
+	// record the durable --listen address that governs the runtime service. In
+	// both modes the recorded listener is what the process binds, so the
+	// metadata value is the effective runtime listener.
 	fmt.Fprintf(out, "listen:  %s\n", meta.listen)
 	fmt.Fprintf(out, "data:    %s\n", paths.DataDir)
 	if meta.envfile != "" {

@@ -448,7 +448,7 @@ func TestAgentInstallRefusalCausesZeroMutation(t *testing.T) {
 				writeFileAtomic(paths.Unit, []byte("[Unit]\nDescription=admin\n[Service]\nExecStart=/usr/bin/x\n[Install]\nWantedBy=multi-user.target\n"), 0o644)
 			case "tampered-unit":
 				u := string(mustRead(t, paths.Unit))
-				writeFileAtomic(paths.Unit, []byte(strings.Replace(u, "127.0.0.1:8090", "127.0.0.1:9999", 1)), 0o644)
+				writeFileAtomic(paths.Unit, []byte(strings.Replace(u, DefaultListen, "127.0.0.1:9999", 1)), 0o644)
 			case "unsupported-enabled-state":
 				setState(r, "masked", "inactive")
 			case "unsupported-active-state":

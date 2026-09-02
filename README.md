@@ -26,9 +26,17 @@ The public installer defaults to `~/.local/bin`; pass `--system` as root for
 `SHA256SUMS` before installation. The current host collector and service
 package support Linux amd64/arm64; other platforms remain a hardening target.
 
-The local interface defaults to `http://127.0.0.1:8090`. The private state
-directory defaults to `/var/lib/watchpost-agent` and can be overridden with
-`--data-dir` or `WATCHPOST_AGENT_DATA_DIR`.
+The local interface defaults to `http://127.0.0.1:7335`. It is configured with
+`--host`/`--port` (or the legacy single-address `--listen`), with
+`WATCHPOST_AGENT_HOST` / `WATCHPOST_AGENT_PORT` / `WATCHPOST_AGENT_LISTEN` and
+the defaults applying below them (CLI > environment > default; ports must be
+1–65535 and values are trimmed once). `--listen` cannot be combined with
+`--host`/`--port`, and a legacy `WATCHPOST_AGENT_LISTEN` conflicts with
+`WATCHPOST_AGENT_HOST`/`WATCHPOST_AGENT_PORT` rather than silently picking one.
+Binding `--host 0.0.0.0` exposes the interface on all IPv4 interfaces and is
+intended only for controlled networks behind a reviewed reverse proxy. The
+private state directory defaults to `/var/lib/watchpost-agent` and can be
+overridden with `--data-dir` or `WATCHPOST_AGENT_DATA_DIR`.
 
 WP-A02 establishes the restart-safe unpaired application. Installation,
 security and pairing arrive in WP-A03–WP-A06.
@@ -75,12 +83,20 @@ is failed or missing. An unpaired service is a supported quiet state. Use
 the installed binary and private state are retained for explicit recovery or
 reset.
 
-`service install --listen` and `service install --env-file` record the agent's
-listen address and an optional protected environment file for
-`WATCHPOST_AGENT_*` variables (exposure, secure cookies, CIDR policy, setup
-token file):
+`service install` records the canonical `--host`/`--port` pair in `ExecStart`
+so the recorded listener is the runtime listener across restart and reboot;
+existing units installed with the legacy `--listen` form keep their listener
+until reinstalled, and a bare reinstall or upgrade preserves the recorded
+listener. `service install --env-file` additionally records an optional
+protected environment file for `WATCHPOST_AGENT_*` variables (exposure, secure
+cookies, CIDR policy, setup token file). Only `install`/`upgrade` resolve the
+listener flags or `WATCHPOST_AGENT_HOST`/`WATCHPOST_AGENT_PORT`, so malformed
+listener environment in the shell never breaks the other lifecycle commands:
 
 ```sh
+sudo ./watchpost-agent service install                          # 127.0.0.1:7335
+sudo ./watchpost-agent service install --host 127.0.0.1 --port 7405
+sudo ./watchpost-agent service install --listen 127.0.0.1:7405  # legacy form
 sudo ./watchpost-agent service install --env-file /etc/watchpost-agent/watchpost-agent.env
 ```
 
@@ -188,10 +204,10 @@ single Agent's UI safely through an SSH tunnel without publishing it to the
 network:
 
 ```sh
-ssh -L 8090:127.0.0.1:8090 operator@monitored-host
+ssh -L 7335:127.0.0.1:7335 operator@monitored-host
 ```
 
-Then open `http://127.0.0.1:8090` in the local browser. Binding a non-loopback
+Then open `http://127.0.0.1:7335` in the local browser. Binding a non-loopback
 address requires an explicit `WATCHPOST_AGENT_EXPOSE=1` opt-in and prints a
 prominent warning. For any remote use terminate HTTPS at a reviewed reverse
 proxy, set `WATCHPOST_AGENT_SECURE_COOKIES=1`, list the proxy in
