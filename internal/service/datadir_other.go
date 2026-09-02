@@ -12,6 +12,7 @@ var errDataDirUnsupported = errors.New("data directory management is supported o
 var (
 	openDataParentSeam       = func(string) (int, error) { return -1, errDataDirUnsupported }
 	dataParentConsistentSeam = func(int, string) bool { return false }
+	parentSafeSeam           = func(int) error { return errDataDirUnsupported }
 	statDataLeafSeam         = func(int, string) (dataLeafInfo, error) { return dataLeafInfo{}, errDataDirUnsupported }
 	mkdirAtLeafSeam          = func(int, string) error { return errDataDirUnsupported }
 	openAtLeafSeam           = func(int, string) (int, error) { return -1, errDataDirUnsupported }

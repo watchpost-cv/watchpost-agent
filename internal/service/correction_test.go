@@ -228,6 +228,7 @@ func TestAgentDataDirRejectsSystemRoots(t *testing.T) {
 func TestAgentDataDirRefusesUnrelatedExistingDirectory(t *testing.T) {
 	m, r, paths := fakeStrictManager(t)
 	useRealDataDirSeams(t)
+	simulateSafeParent(t)
 	dir := t.TempDir()
 	existing := filepath.Join(dir, "existing-data")
 	os.MkdirAll(existing, 0o755)
@@ -256,6 +257,7 @@ func TestAgentDataDirRefusesUnrelatedExistingDirectory(t *testing.T) {
 func TestAgentDataDirLeafOnlyCreation(t *testing.T) {
 	m, r, paths := fakeStrictManager(t)
 	useRealDataDirSeams(t)
+	simulateSafeParent(t)
 	parent := t.TempDir()
 	newData := filepath.Join(parent, "agent-data")
 	p := paths
@@ -279,6 +281,7 @@ func TestAgentDataDirLeafOnlyCreation(t *testing.T) {
 func TestAgentDataDirRefusesMissingParent(t *testing.T) {
 	m, r, paths := fakeStrictManager(t)
 	useRealDataDirSeams(t)
+	simulateSafeParent(t)
 	dir := t.TempDir()
 	missingParent := filepath.Join(dir, "does-not-exist")
 	dataDir := filepath.Join(missingParent, "agent-data")
@@ -459,7 +462,14 @@ func TestAgentInstallRefusalCausesZeroMutation(t *testing.T) {
 				os.WriteFile(bad, []byte("X=1\n"), 0o644)
 				envfile = bad
 			case "unacceptable-data-dir":
+				// An existing leaf not owned by the service account is refused
+				// during preflight inspection: the leaf descriptor is opened and
+				// fstat'd, and the descriptor's UID is validated (not the name).
 				statDataLeafSeam = func(int, string) (dataLeafInfo, error) {
+					return dataLeafInfo{isDir: true, mode: 0o755, uid: 1000}, nil
+				}
+				openAtLeafSeam = func(int, string) (int, error) { return 2, nil }
+				fstatLeafSeam = func(int) (dataLeafInfo, error) {
 					return dataLeafInfo{isDir: true, mode: 0o755, uid: 1000}, nil
 				}
 			}
@@ -484,6 +494,7 @@ func TestAgentInstallRefusalCausesZeroMutation(t *testing.T) {
 func TestAgentDataDirRefusesAncestorSymlinkEscape(t *testing.T) {
 	m, r, paths := fakeStrictManager(t)
 	useRealDataDirSeams(t)
+	simulateSafeParent(t)
 	base := t.TempDir()
 	protected := filepath.Join(base, "protected")
 	os.MkdirAll(protected, 0o755)
@@ -511,6 +522,7 @@ func TestAgentDataDirChmodFailure(t *testing.T) {
 	{
 		m, _, paths := fakeStrictManager(t)
 		useRealDataDirSeams(t)
+		simulateSafeParent(t)
 		parent := t.TempDir()
 		p := paths
 		p.DataDir = filepath.Join(parent, "agent-data")
@@ -528,6 +540,7 @@ func TestAgentDataDirChmodFailure(t *testing.T) {
 	{
 		m, _, paths := fakeStrictManager(t)
 		useRealDataDirSeams(t)
+		simulateSafeParent(t)
 		dir := t.TempDir()
 		p := paths
 		p.DataDir = filepath.Join(dir, "existing")
@@ -599,6 +612,7 @@ func TestAgentUnchangedReinstallPreservesPriorState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, r, paths := fakeStrictManager(t)
 			useRealDataDirSeams(t)
+			simulateSafeParent(t)
 			dataDir := filepath.Join(t.TempDir(), "agent-data")
 			if e := os.Mkdir(dataDir, 0o700); e != nil {
 				t.Fatal(e)
@@ -623,6 +637,7 @@ func TestAgentUnchangedReinstallPreservesPriorState(t *testing.T) {
 func TestAgentNoOpRepairsMissingDataLeaf(t *testing.T) {
 	m, r, paths := fakeStrictManager(t)
 	useRealDataDirSeams(t)
+	simulateSafeParent(t)
 	dataDir := filepath.Join(t.TempDir(), "agent-data")
 	p := paths
 	p.DataDir = dataDir
@@ -646,6 +661,7 @@ func TestAgentDataDirEstablishmentFailuresCleanUp(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m, r, paths := fakeStrictManager(t)
 			useRealDataDirSeams(t)
+			simulateSafeParent(t)
 			p := paths
 			p.DataDir = filepath.Join(t.TempDir(), "agent-data")
 			binBefore := mustRead(t, paths.Binary)
@@ -680,6 +696,7 @@ func TestAgentDataDirEstablishmentFailuresCleanUp(t *testing.T) {
 	t.Run("cleanup-failure-reported", func(t *testing.T) {
 		m, r, paths := fakeStrictManager(t)
 		useRealDataDirSeams(t)
+		simulateSafeParent(t)
 		p := paths
 		p.DataDir = filepath.Join(t.TempDir(), "agent-data")
 		fchmodLeafSeam = func(int) error { return errors.New("chmod denied") }
@@ -700,6 +717,7 @@ func TestAgentDataDirEstablishmentFailuresCleanUp(t *testing.T) {
 func TestAgentDataDirAncestorSwapAfterInspectionRefused(t *testing.T) {
 	m, r, paths := fakeStrictManager(t)
 	useRealDataDirSeams(t)
+	simulateSafeParent(t)
 	original := t.TempDir()
 	substitute := t.TempDir()
 	p := paths
@@ -723,5 +741,92 @@ func TestAgentDataDirAncestorSwapAfterInspectionRefused(t *testing.T) {
 	}
 	if len(r.log) != 0 {
 		t.Fatal("ancestor-swap install touched systemctl")
+	}
+}
+
+func TestAgentDataDirExistingLeafReplacedAfterInspection(t *testing.T) {
+	useRealDataDirSeams(t)
+	simulateSafeParent(t)
+	dir := t.TempDir()
+	original := filepath.Join(dir, "leaf")
+	replacement := filepath.Join(dir, "replacement")
+	os.Mkdir(original, 0o700)
+	os.Mkdir(replacement, 0o750)
+	serviceUID = func() (int, error) { return os.Getuid(), nil }
+	plan, err := inspectDataDir(original)
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	defer plan.close()
+	if plan.status != dataDirAcceptExisting {
+		t.Fatalf("expected existing leaf, got status %d", plan.status)
+	}
+	if err := os.Rename(original, original+"-moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := establishDataDir(&plan); err != nil {
+		t.Fatalf("establish: %v", err)
+	}
+	info, _ := os.Stat(original + "-moved")
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("retained original leaf not chmod'd 0700: %v", info.Mode().Perm())
+	}
+	info2, _ := os.Stat(original)
+	if info2.Mode().Perm() != 0o750 {
+		t.Fatalf("replacement leaf was chmod'd by the installer: %v", info2.Mode().Perm())
+	}
+}
+
+func TestAgentDataDirParentSafety(t *testing.T) {
+	fakeStrictManager(t)
+	useRealDataDirSeams(t)
+	dir := t.TempDir()
+	fd, err := openDataParentSeam(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFdSeam(fd)
+	if e := parentSafeSeam(fd); e == nil {
+		t.Fatal("non-root parent accepted")
+	}
+	gw := filepath.Join(t.TempDir(), "gw")
+	os.Mkdir(gw, 0o770)
+	gfd, err := openDataParentSeam(gw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFdSeam(gfd)
+	if e := parentSafeSeam(gfd); e == nil {
+		t.Fatal("group-writable parent accepted")
+	}
+	ww := filepath.Join(t.TempDir(), "ww")
+	os.Mkdir(ww, 0o707)
+	wfd, err := openDataParentSeam(ww)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFdSeam(wfd)
+	if e := parentSafeSeam(wfd); e == nil {
+		t.Fatal("world-writable parent accepted")
+	}
+	// Refusal before account/data mutation.
+	m, r, paths := fakeStrictManager(t)
+	useRealDataDirSeams(t)
+	c := watchAgentMutations(t)
+	p := paths
+	p.DataDir = filepath.Join(t.TempDir(), "sub")
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if e := m.Install(exe, p, DefaultListen, ""); e == nil {
+		t.Fatal("install accepted a non-root parent")
+	}
+	if c.any() {
+		t.Fatalf("non-root parent install mutated account/mkdir/chmod/chown: %+v", c)
+	}
+	if len(r.log) != 0 {
+		t.Fatalf("non-root parent install touched systemctl: %v", r.log)
 	}
 }

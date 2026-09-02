@@ -235,20 +235,26 @@ type dataLeafInfo struct {
 }
 
 // dataDirPlan is the result of the non-mutating inspection. It retains the
-// validated parent directory descriptor so the mutation phase is bound to the
-// exact directory inspected, never re-walked by pathname.
+// validated parent directory descriptor AND, for an existing leaf, the retained
+// leaf descriptor, so the mutation phase is bound to the exact objects
+// inspected, never re-walked by pathname.
 type dataDirPlan struct {
 	status   dataDirStatus
 	parentFd int
+	leafFd   int // retained leaf descriptor for an existing leaf; -1 for a fresh leaf
 	leafName string
 	path     string
 }
 
-// close releases the retained parent descriptor (idempotent).
+// close releases the retained descriptors exactly once (idempotent).
 func (p *dataDirPlan) close() {
 	if p.parentFd >= 0 {
 		closeFdSeam(p.parentFd)
 		p.parentFd = -1
+	}
+	if p.leafFd >= 0 {
+		closeFdSeam(p.leafFd)
+		p.leafFd = -1
 	}
 }
 
