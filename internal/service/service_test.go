@@ -69,14 +69,17 @@ func fakeManager(t *testing.T) (Manager, *fakeRunner, Paths) {
 	t.Helper()
 	oldAccount, oldMkdir, oldChown := ensureAccount, mkdirData, chownData
 	oldUID, oldOwned := serviceUID, requireServiceOwned
+	oldChmod := chmodPath
 	ensureAccount = func() error { return nil }
 	mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
 	chownData = func(path string) error { return nil }
+	chmodPath = func(string, os.FileMode) error { return nil }
 	serviceUID = func() (int, error) { return 4242, nil }
 	requireServiceOwned = func(string) error { return nil }
 	t.Cleanup(func() {
 		ensureAccount, mkdirData, chownData = oldAccount, oldMkdir, oldChown
 		serviceUID, requireServiceOwned = oldUID, oldOwned
+		chmodPath = oldChmod
 	})
 	dir := t.TempDir()
 	paths := Paths{

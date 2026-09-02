@@ -206,52 +206,104 @@ func validateEnvFile(path string) error {
 	return nil
 }
 
-// prepareDataDir safely establishes the service data directory. A newly
-// created LEAF directory is created (only if its parent already exists as a
-// real, non-symlink directory) and assigned to the service account. An
-// existing directory is only reused if it is a non-symlink directory already
-// owned by the service account with no group/world-write bits; an unrelated
-// or root-owned existing directory is refused rather than silently adopted.
-// Parent directories are never created or adopted by the installer.
-func prepareDataDir(path string) error {
+// dataDirState is the result of a non-mutating data-directory preflight.
+type dataDirState int
+
+const (
+	dataUnsafe            dataDirState = iota // refused; caller must not proceed
+	dataMissingSafeParent                     // leaf absent; parent exists, real, non-symlink
+	dataPresentSafe                           // leaf exists and is service-owned
+)
+
+// chmodPath is a test seam for mode establishment.
+var chmodPath = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
+
+// validateAncestorChain refuses any existing ancestor of the data-directory
+// leaf that is a symlink, so a lexical path cannot resolve through an ancestor
+// symlink into a protected location. It is non-mutating.
+func validateAncestorChain(leaf string) error {
+	for p := filepath.Dir(leaf); ; p = filepath.Dir(p) {
+		info, e := os.Lstat(p)
+		if e != nil {
+			if errors.Is(e, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("cannot inspect data directory ancestor %q: %w", p, e)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("data directory ancestor %q is a symlink; refusing to create or adopt a leaf through it", p)
+		}
+		if p == "/" {
+			return nil
+		}
+	}
+}
+
+// inspectDataDir performs the non-mutating data-directory preflight.
+func inspectDataDir(path string) (dataDirState, error) {
 	clean := filepath.Clean(path)
-	info, err := os.Lstat(clean)
-	if errors.Is(err, os.ErrNotExist) {
+	if e := validateAncestorChain(clean); e != nil {
+		return dataUnsafe, e
+	}
+	info, e := os.Lstat(clean)
+	if errors.Is(e, os.ErrNotExist) {
 		parent := filepath.Dir(clean)
 		pinfo, e := os.Lstat(parent)
 		if e != nil {
-			return fmt.Errorf("data directory parent %q does not exist; create the parent hierarchy and retry (the installer creates only the final data-directory leaf)", parent)
+			return dataUnsafe, fmt.Errorf("data directory parent %q does not exist; create the parent hierarchy and retry (the installer creates only the final data-directory leaf)", parent)
 		}
 		if pinfo.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("data directory parent %q must not be a symlink", parent)
+			return dataUnsafe, fmt.Errorf("data directory parent %q must not be a symlink", parent)
 		}
 		if !pinfo.IsDir() {
-			return fmt.Errorf("data directory parent %q is not a directory", parent)
+			return dataUnsafe, fmt.Errorf("data directory parent %q is not a directory", parent)
 		}
-		if err := mkdirData(clean, 0700); err != nil {
-			return fmt.Errorf("cannot create data directory %q: %w", path, err)
+		return dataMissingSafeParent, nil
+	}
+	if e != nil {
+		return dataUnsafe, fmt.Errorf("data directory %q: %w", path, e)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return dataUnsafe, fmt.Errorf("data directory %q must not be a symlink", path)
+	}
+	if !info.IsDir() {
+		return dataUnsafe, fmt.Errorf("data directory %q is not a directory", path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return dataUnsafe, fmt.Errorf("data directory %q must not be group- or world-writable", path)
+	}
+	if e := requireServiceOwned(path); e != nil {
+		return dataUnsafe, e
+	}
+	return dataPresentSafe, nil
+}
+
+// establishDataDir mutatingly establishes the data directory leaf after a
+// successful non-mutating preflight. A chmod/chown failure on a freshly created
+// leaf removes the partial leaf and surfaces the error.
+func establishDataDir(path string) error {
+	clean := filepath.Clean(path)
+	_, e := os.Lstat(clean)
+	if errors.Is(e, os.ErrNotExist) {
+		if e := mkdirData(clean, 0700); e != nil {
+			return fmt.Errorf("cannot create data directory %q: %w", path, e)
 		}
-		if err := chownData(clean); err != nil {
-			return err
+		if e := chmodPath(clean, 0700); e != nil {
+			_ = os.Remove(clean)
+			return fmt.Errorf("set data directory mode 0700: %w", e)
+		}
+		if e := chownData(clean); e != nil {
+			_ = os.Remove(clean)
+			return fmt.Errorf("assign data directory to the service account: %w", e)
 		}
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("data directory %q: %w", path, err)
+	if e != nil {
+		return fmt.Errorf("data directory %q: %w", path, e)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("data directory %q must not be a symlink", path)
+	if e := chmodPath(clean, 0700); e != nil {
+		return fmt.Errorf("set existing data directory mode 0700: %w", e)
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("data directory %q is not a directory", path)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("data directory %q must not be group- or world-writable", path)
-	}
-	if err := requireServiceOwned(path); err != nil {
-		return err
-	}
-	_ = os.Chmod(path, 0700)
 	return nil
 }
 
@@ -607,6 +659,10 @@ var chownData = func(path string) error { return chownAgent(path) }
 // and the returned error combines the original failure with any rollback
 // failure.
 func (m Manager) Install(source string, paths Paths, listen, envfile string) (retErr error) {
+	// Non-mutating preflight runs first so a foreign/tampered unit, unsupported
+	// state, state-query failure, invalid executable, invalid environment file
+	// or unacceptable data directory is rejected with zero account, mkdir,
+	// chmod, chown, binary, unit or lifecycle mutation.
 	for _, v := range []struct{ val, name string }{
 		{listen, "listen"}, {paths.DataDir, "data-dir"},
 	} {
@@ -620,9 +676,6 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 	if err := validateDataDirPath(paths.DataDir); err != nil {
 		return err
 	}
-	if err := prepareDataDir(paths.DataDir); err != nil {
-		return err
-	}
 	if envfile != "" {
 		if err := validateEnvFile(envfile); err != nil {
 			return err
@@ -631,9 +684,13 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 	if _, e := exec.LookPath("systemctl"); e != nil {
 		return errors.New("systemctl not found; is systemd installed?")
 	}
-	if e := ensureAccount(); e != nil {
+	// Inspect the requested data path WITHOUT mutation.
+	dataState, e := inspectDataDir(paths.DataDir)
+	if e != nil {
 		return e
 	}
+	// Read and authenticate the existing managed unit (non-mutating).
+	unit := Unit(paths, listen, envfile)
 	oldUnit, hasUnit := readFileIfPresent(paths.Unit)
 	priorEnabled, priorActive := "", ""
 	if hasUnit {
@@ -657,37 +714,35 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 			return fmt.Errorf("refusing to reinstall the service: prior state %s+%s cannot be restored exactly; unmask it first", priorEnabled, priorActive)
 		}
 	}
-	hasBinary := false
-	if _, e := os.Stat(paths.Binary); e == nil {
-		hasBinary = true
-	}
+	// Inspect the incoming and installed executables (non-mutating).
 	incomingDigest, err := fileSHA256(source)
 	if err != nil {
 		return fmt.Errorf("read incoming executable: %w", err)
 	}
+	hasBinary := false
 	priorDigest := ""
-	if hasBinary {
+	if _, e := os.Stat(paths.Binary); e == nil {
+		hasBinary = true
 		priorDigest, _ = fileSHA256(paths.Binary)
 	}
 	binaryChanged := !hasBinary || incomingDigest != priorDigest
-	unit := Unit(paths, listen, envfile)
 	unitChanged := !hasUnit || string(oldUnit) != unit
-	if !unitChanged && !binaryChanged {
-		if priorEnabled == "enabled" && priorActive == "active" {
-			return nil
-		}
-		steps := [][]string{}
-		if priorEnabled != "enabled" {
-			steps = append(steps, []string{"enable", "watchpost-agent.service"})
-		}
-		if priorActive != "active" {
-			steps = append(steps, []string{"start", "watchpost-agent.service"})
-		}
-		for _, args := range steps {
-			if err := m.systemctlSuccess(paths, args...); err != nil {
-				return fmt.Errorf("bringing the service to the installed state: %w", err)
-			}
-		}
+	// Genuine no-op decision is prerequisite-aware. An unchanged existing
+	// installation preserves its prior state (never silently enabled+started),
+	// and a safely missing leaf is repaired rather than claimed correct.
+	preserved := hasUnit && !unitChanged && !binaryChanged && priorEnabled == "enabled" && priorActive == "active"
+	if preserved && dataState == dataPresentSafe {
+		return nil
+	}
+	repairDataOnly := preserved && dataState == dataMissingSafeParent
+	// ---- Mutation phase begins here ----
+	if e := ensureAccount(); e != nil {
+		return e
+	}
+	if e := establishDataDir(paths.DataDir); e != nil {
+		return e
+	}
+	if repairDataOnly {
 		return nil
 	}
 	if hasBinary {
@@ -698,8 +753,12 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 	installOK := false
 	restore := func() string {
 		var errs []string
-		_ = m.systemctlSuccess(paths, "stop", "watchpost-agent.service")
-		_ = m.systemctlSuccess(paths, "disable", "watchpost-agent.service")
+		if e := m.systemctlSuccess(paths, "stop", "watchpost-agent.service"); e != nil {
+			errs = append(errs, fmt.Sprintf("neutralize stop: %v", e))
+		}
+		if e := m.systemctlSuccess(paths, "disable", "watchpost-agent.service"); e != nil {
+			errs = append(errs, fmt.Sprintf("neutralize disable: %v", e))
+		}
 		if hasBinary {
 			if e := copyFile(paths.Binary+".preinstall", paths.Binary, 0o755); e != nil {
 				errs = append(errs, fmt.Sprintf("restore binary: %v", e))
@@ -748,11 +807,10 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 		return e
 	}
 	// Forward path: a fresh install establishes the machine-service default
-	// (enabled + active). An EXISTING managed installation must preserve its
-	// exact prior enablement and activity states through the same canonical
-	// restoration helpers used by failed-install rollback, so a changed
-	// binary/unit can never silently convert a disabled+inactive service into
-	// enabled+active or a runtime-only enablement into a persistent one.
+	// (enabled + active). An EXISTING managed installation (changed OR
+	// unchanged) must preserve its exact prior enablement and activity states
+	// through the same canonical restoration helpers used by failed-install
+	// rollback.
 	steps := [][]string{}
 	if unitChanged {
 		steps = append(steps, []string{"daemon-reload"})
