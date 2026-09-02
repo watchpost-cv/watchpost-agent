@@ -59,7 +59,7 @@ jobs:
           sudo /tmp/wpa service install
           # account and data ownership are created by install
           id watchpost-agent
-          sudo test -O "$DATA" -o "$(stat -c %U "$DATA")" = watchpost-agent || exit 1
+          test "$(stat -c %U "$DATA")" = watchpost-agent || exit 1
           systemctl is-active watchpost-agent.service
           wait_healthz
           # install is idempotent (byte-identical + enabled + active -> no-op)
