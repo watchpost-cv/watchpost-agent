@@ -780,10 +780,25 @@ func TestAgentDataDirExistingLeafReplacedAfterInspection(t *testing.T) {
 	}
 }
 
+// nonRootTempParent returns a temporary directory whose ownership
+// deterministically fails the root-owned parent safety check regardless of the
+// test runner's uid. Running as root the directory is chowned to a non-root uid
+// (nobody); running unprivileged it is already owned by the test user.
+func nonRootTempParent(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if os.Geteuid() == 0 {
+		if err := os.Chown(dir, 65534, 65534); err != nil {
+			t.Skipf("cannot chown temp parent to a non-root uid: %v", err)
+		}
+	}
+	return dir
+}
+
 func TestAgentDataDirParentSafety(t *testing.T) {
 	fakeStrictManager(t)
 	useRealDataDirSeams(t)
-	dir := t.TempDir()
+	dir := nonRootTempParent(t)
 	fd, err := openDataParentSeam(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -817,7 +832,7 @@ func TestAgentDataDirParentSafety(t *testing.T) {
 	useRealDataDirSeams(t)
 	c := watchAgentMutations(t)
 	p := paths
-	p.DataDir = filepath.Join(t.TempDir(), "sub")
+	p.DataDir = filepath.Join(nonRootTempParent(t), "sub")
 	exe := filepath.Join(t.TempDir(), "agent2")
 	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	if e := m.Install(exe, p, DefaultListen, ""); e == nil {
