@@ -102,3 +102,51 @@ jobs:
           sudo /tmp/wpa service uninstall
           test ! -f /etc/systemd/system/watchpost-agent.service
           sudo test -d "$DATA"
+      - name: Rehearse partial-failure rollback (deterministic activation failure)
+        run: |
+          set -euxo pipefail
+          wait_healthz() {
+            for _ in $(seq 1 40); do
+              if curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 0.5
+            done
+            return 1
+          }
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/systemctl <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *"restart watchpost-agent.service"*) echo "simulated activation failure" >&2; exit 1 ;;
+            *) exit 0 ;;
+          esac
+          EOF
+          chmod +x /tmp/fakebin/systemctl
+          set +e
+          sudo env "PATH=/tmp/fakebin:/usr/sbin:/usr/bin:/bin" /tmp/wpa service install > /tmp/install-fail.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "install with failing activation succeeded unexpectedly" >&2; exit 1; }
+          grep -q "rolled back" /tmp/install-fail.log || { echo "install did not report rollback" >&2; cat /tmp/install-fail.log >&2; exit 1; }
+          test ! -f /etc/systemd/system/watchpost-agent.service || { echo "unit left behind after rollback" >&2; exit 1; }
+          sudo test -d /var/lib/watchpost-agent
+          # Installation can then be repeated successfully.
+          sudo /tmp/wpa service install
+          wait_healthz
+          sudo /tmp/wpa service uninstall || true
+          # Second branch: no pre-existing binary.
+          sudo rm -f /usr/local/bin/watchpost-agent
+          set +e
+          sudo env "PATH=/tmp/fakebin:/usr/sbin:/usr/bin:/bin" /tmp/wpa service install > /tmp/install-fail2.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "no-binary install with failing activation succeeded unexpectedly" >&2; exit 1; }
+          grep -q "rolled back" /tmp/install-fail2.log || { echo "no-binary install did not report rollback" >&2; exit 1; }
+          test ! -f /etc/systemd/system/watchpost-agent.service || { echo "unit left behind after no-binary rollback" >&2; exit 1; }
+          test ! -f /usr/local/bin/watchpost-agent || { echo "newly copied binary not removed after no-binary rollback" >&2; exit 1; }
+          sudo test -d /var/lib/watchpost-agent
+          # A normal install then succeeds again.
+          sudo /tmp/wpa service install
+          wait_healthz
+          sudo /tmp/wpa service uninstall || true
