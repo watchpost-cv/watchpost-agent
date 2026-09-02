@@ -356,6 +356,78 @@ func TestRollbackFailClosedWithoutMarker(t *testing.T) {
 	}
 }
 
+// TestRecoveryFailsClosedWhenMarkerCorruptedAtRecoveryTime is the corrected
+// real-sequence regression: the marker is written by Update, the new binary is
+// activated, the health check fails, and only THEN is the marker corrupted (via
+// a narrow injectable read seam) so recovery must fail closed rather than guess
+// to active.
+func TestRecoveryFailsClosedWhenMarkerCorruptedAtRecoveryTime(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	setState(r, "enabled", "active")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	oldHealth := healthCheck
+	healthCheck = func(url string) error { return fmt.Errorf("health failed") }
+	defer func() { healthCheck = oldHealth }()
+	oldWin := healthWindow
+	healthWindow = func() time.Duration { return 1 * time.Second }
+	defer func() { healthWindow = oldWin }()
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+	r.script["systemctl stop watchpost-agent.service"] = fakeResult{}
+	orig := priorStateFileRead
+	priorStateFileRead = func(path string) ([]byte, error) {
+		if strings.HasSuffix(path, ".prior-active") {
+			return []byte("garbage"), nil
+		}
+		return os.ReadFile(path)
+	}
+	defer func() { priorStateFileRead = orig }()
+	uerr := m.Update(exe, fakeSHA(exe), paths)
+	if uerr == nil {
+		t.Fatal("update succeeded despite corrupted recovery marker")
+	}
+	if !strings.Contains(uerr.Error(), "recovery") {
+		t.Fatalf("recovery fail-closed degradation not surfaced: %v", uerr)
+	}
+}
+
+// TestRecoveryFailsClosedWhenMarkerMissingAtRecoveryTime proves recovery does
+// not guess to active when the marker disappears at recovery time (after Update
+// wrote it), without test-side fabrication before Update.
+func TestRecoveryFailsClosedWhenMarkerMissingAtRecoveryTime(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	setState(r, "enabled", "active")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	oldHealth := healthCheck
+	healthCheck = func(url string) error { return fmt.Errorf("health failed") }
+	defer func() { healthCheck = oldHealth }()
+	oldWin := healthWindow
+	healthWindow = func() time.Duration { return 1 * time.Second }
+	defer func() { healthWindow = oldWin }()
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+	r.script["systemctl stop watchpost-agent.service"] = fakeResult{}
+	orig := priorStateFileRead
+	priorStateFileRead = func(path string) ([]byte, error) {
+		if strings.HasSuffix(path, ".prior-active") {
+			return nil, fmt.Errorf("marker vanished")
+		}
+		return os.ReadFile(path)
+	}
+	defer func() { priorStateFileRead = orig }()
+	uerr := m.Update(exe, fakeSHA(exe), paths)
+	if uerr == nil {
+		t.Fatal("update succeeded despite missing recovery marker")
+	}
+	if !strings.Contains(uerr.Error(), "recovery") {
+		t.Fatalf("recovery fail-closed degradation not surfaced: %v", uerr)
+	}
+}
+
 func TestEndToEndActiveUpdateThenRollback(t *testing.T) {
 	m, r, paths := fakeManager(t)
 	installManagedUnit(t, paths)

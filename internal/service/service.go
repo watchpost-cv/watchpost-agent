@@ -997,7 +997,7 @@ var healthWindow = func() time.Duration { return 30 * time.Second }
 // operational state after a failed update. It fails closed if the prior-state
 // marker is missing or invalid at recovery time.
 func (m Manager) restoreAfterFailedUpdate(paths Paths) error {
-	b, err := os.ReadFile(paths.Binary + ".prior-active")
+	b, err := priorStateFileRead(paths.Binary + ".prior-active")
 	if err != nil {
 		return fmt.Errorf("recovery: no prior-state marker: %w", err)
 	}
@@ -1032,7 +1032,7 @@ func (m Manager) Rollback(paths Paths) error {
 	if _, e := os.Stat(paths.Binary + ".rollback"); e != nil {
 		return errors.New("no rollback binary available")
 	}
-	b, err := os.ReadFile(paths.Binary + ".prior-active")
+	b, err := priorStateFileRead(paths.Binary + ".prior-active")
 	if err != nil {
 		return fmt.Errorf("rollback: no prior-state marker; refusing to guess the service state")
 	}
@@ -1065,6 +1065,10 @@ func (m Manager) Rollback(paths Paths) error {
 	_ = os.Remove(paths.Binary + ".rollback")
 	return nil
 }
+
+// priorStateFileRead is a narrow injectable seam so tests can corrupt the
+// marker at the exact recovery-time stage (after Update has written it).
+var priorStateFileRead = os.ReadFile
 
 // Verify returns nil when the artifact's SHA-256 matches want.
 func Verify(path, want string) error {
