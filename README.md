@@ -27,26 +27,31 @@ The public installer defaults to `~/.local/bin`; pass `--system` as root for
 package support Linux amd64/arm64; other platforms remain a hardening target.
 
 The local interface defaults to `http://127.0.0.1:8090`. The private state
-directory defaults to `~/.local/share/watchpost-agent` and can be overridden
-with `--data-dir` or `WATCHPOST_AGENT_DATA_DIR`.
+directory defaults to `/var/lib/watchpost-agent` and can be overridden with
+`--data-dir` or `WATCHPOST_AGENT_DATA_DIR`.
 
 WP-A02 establishes the restart-safe unpaired application. Installation,
 security and pairing arrive in WP-A03–WP-A06.
 
-Install the per-user service before pairing:
+Install the machine service before pairing (requires root for the first
+install, which creates the dedicated `watchpost-agent` account):
 
 ```sh
-./watchpost-agent service install
+sudo ./watchpost-agent service install
 ./watchpost-agent service status
 ./watchpost-agent service logs            # or: ... service logs --follow
-./watchpost-agent service restart
-./watchpost-agent service stop
-./watchpost-agent service start
+sudo ./watchpost-agent service restart
+sudo ./watchpost-agent service stop
+sudo ./watchpost-agent service start
 ```
 
-`watchpost-agent service ...` is the canonical form; the top-level
-`install`/`upgrade`/`status`/`start`/`stop`/`restart`/`logs`/`uninstall`
-commands remain as compatibility aliases.
+The agent runs as a systemd **system** unit under a dedicated unprivileged
+`watchpost-agent` account (nologin, no home). It starts at boot with
+`WantedBy=multi-user.target` and does **not** depend on any user login or on
+systemd lingering. The binary is installed at `/usr/local/bin/watchpost-agent`
+and the data directory is `/var/lib/watchpost-agent` (0700, owned
+`watchpost-agent:watchpost-agent`). The full lifecycle family matches the Web
+Fleet convention: `install|uninstall|start|stop|restart|status|enable|disable|logs|update|rollback`.
 
 Installation is a transaction. The prior managed unit and installed binary are
 preserved, prior systemd enablement and activity are inspected before mutation,
@@ -66,10 +71,9 @@ or removed silently, and lifecycle commands refuse to operate on it. `status`
 reports enabled/running state, PID, version, listen address and a live health
 check of the public `GET /healthz` endpoint, and exits nonzero when the service
 is failed or missing. An unpaired service is a supported quiet state. Use
-`./watchpost-agent service uninstall` to remove the service and installed
-binary; private state is retained for explicit recovery or reset. Uninstall
-stops and disables the service only after verifying safe states and restores
-the unit atomically if the final reload fails.
+`sudo ./watchpost-agent service uninstall` to remove the service registration;
+the installed binary and private state are retained for explicit recovery or
+reset.
 
 `service install --listen` and `service install --env-file` record the agent's
 listen address and an optional protected environment file for
@@ -77,51 +81,40 @@ listen address and an optional protected environment file for
 token file):
 
 ```sh
-./watchpost-agent service install --env-file /absolute/protected/agent.env
+sudo ./watchpost-agent service install --env-file /etc/watchpost-agent/watchpost-agent.env
 ```
 
-The environment file must be an absolute, regular, non-symlink file with
-exactly `0600` permissions, owned by the invoking user; it is referenced by the
-unit's `EnvironmentFile=` and its path is recorded in the integrity-checked
-managed metadata. Secret values are never copied into the unit or printed. The
-recorded environment file is revalidated before `service start`, `service
-restart` and `service status`; `service stop`, `service logs` and `service
-uninstall` remain available even if it is missing. Changing it takes effect on
-`service restart`. Install creates the agent data directory with owner-only
-permissions and refuses symlink, non-directory or group/world-writable paths.
+The machine configuration file must be an absolute, regular, non-symlink file
+with exactly `0600` permissions, owned by `root:root`; it is read by systemd via
+`EnvironmentFile=` **before** the process drops to `User=watchpost-agent`, so
+the agent cannot rewrite its own machine configuration. Secret values are never
+copied into the unit or printed. The recorded environment file is revalidated
+before `service start`, `service restart` and `service status`; `service stop`,
+`service logs` and `service uninstall` remain available even if it is missing.
+Changing it takes effect on `service restart`. Install creates the agent data
+directory with owner-only permissions and refuses symlink, non-directory or
+group/world-writable paths.
 
-`service upgrade` (or `upgrade`) after replacing the downloaded executable
-publishes the new binary through the same transaction as install: the prior
-unit and binary are preserved for rollback, a byte-identical unit and binary on
-an already enabled and active service is a genuine no-op, and a changed binary
-is published transactionally and restarts the service. It does not change
-installation identity, local configuration, queue or pairing, and preserves the
-installed listen address and environment file unless you pass an explicit
-`--listen`/`--env-file` override.
+`service update ARTIFACT SHA256` replaces the binary with a checksum-verified
+artifact, preserving the prior running/stopped state and enablement, and
+retaining rollback metadata so a later `service rollback` restores the previous
+version and its operational state. Failed updates recover to the previous
+binary before reactivation and surface both the update and recovery failures
+when both occur. `service upgrade` (a compatibility alias of install) publishes
+the current executable through the same transaction; it does not change
+installation identity, local configuration, queue or pairing.
 
-### Persistence and lingering
+### Least privilege and sandboxing
 
-Once installed, the service runs independently of the terminal that launched
-it: closing the terminal does not stop it. A systemd user service is tied to
-your OS user's user manager, so it normally starts when that user manager
-starts (for example at your first login after boot). Unattended boot or
-continuing to run after you log out may require lingering for your user:
-
-```sh
-loginctl show-user "$USER" -p Linger
-loginctl enable-linger "$USER"   # explicit host-level choice
-```
-
-Enable lingering deliberately: it keeps your user's services running without a
-login session and changes what runs unattended. The unit records the absolute
-path of the `watchpost-agent` executable at install time (in
-`~/.local/lib/watchpost-agent/`); moving or deleting that binary will break the
-service.
-
-`--system` is **not currently supported**: the previous system-wide mode ran
-the agent's web service (setup, login, configuration, pairing, rotation, reset
-and account-management endpoints) as root, which is not an acceptable default.
-A dedicated unprivileged service account design is a documented follow-up.
+The agent runs **unprivileged**. It does not require root to read its telemetry
+(`/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime` and
+`statfs()` on filesystems are all available to an unprivileged user). The
+generated unit applies `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
+`ProtectHome=true`, `ReadWritePaths=/var/lib/watchpost-agent` and
+`Restart=on-failure`. Additional systemd isolation controls are added
+incrementally and validated against the real telemetry pipeline before they are
+retained — a hardening control that breaks CPU/memory/load/filesystem reporting
+is never shipped.
 
 The local website requires an email address and a seven-character-or-longer
 administrator password. For a headless server, configure the same state without

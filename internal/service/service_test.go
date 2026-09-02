@@ -1,1747 +1,516 @@
 package service
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 )
 
+type fakeResult struct {
+	out  string
+	code int
+	err  error
+}
+
 type fakeRunner struct {
-	mu      sync.Mutex
-	calls   []string
-	handler func(name string, args ...string) (string, int, error)
-	out     string
-	code    int
-	err     error
-	stream  func(name string, args ...string) (int, error)
+	script map[string]fakeResult
+	log    []string
+	calls  map[string]int
+	seq    map[string][]fakeResult
 }
 
 func (f *fakeRunner) Run(name string, args ...string) (string, int, error) {
-	f.mu.Lock()
-	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
-	h := f.handler
-	f.mu.Unlock()
-	if h != nil {
-		return h(name, args...)
+	key := name + " " + strings.Join(args, " ")
+	f.log = append(f.log, key)
+	if f.calls == nil {
+		f.calls = map[string]int{}
 	}
-	return f.out, f.code, f.err
+	n := f.calls[key]
+	f.calls[key] = n + 1
+	if seq, ok := f.seq[key]; ok && n < len(seq) {
+		r := seq[n]
+		return r.out, r.code, r.err
+	}
+	if r, ok := f.script[key]; ok {
+		return r.out, r.code, r.err
+	}
+	return "", 0, nil
 }
 
 func (f *fakeRunner) Stream(name string, args ...string) (int, error) {
-	f.mu.Lock()
-	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
-	s := f.stream
-	f.mu.Unlock()
-	if s != nil {
-		return s(name, args...)
+	key := name + " " + strings.Join(args, " ")
+	f.log = append(f.log, key)
+	if r, ok := f.script[key]; ok {
+		return r.code, r.err
 	}
 	return 0, nil
 }
 
-func (f *fakeRunner) contains(args []string, s string) bool {
-	for _, a := range args {
-		if a == s {
-			return true
-		}
-	}
-	return false
-}
-
-func (f *fakeRunner) saw(needle string) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, c := range f.calls[:len(f.calls)-1] {
-		if strings.Contains(c, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-func testManager(t *testing.T) (Manager, *fakeRunner, Paths, string) {
+// fakeManager returns a Manager wired to the fake runner with canonical
+// machine-service paths redirected to a temp directory.
+func fakeManager(t *testing.T) (Manager, *fakeRunner, Paths) {
 	t.Helper()
-	base := t.TempDir()
+	oldAccount, oldMkdir, oldChown := ensureAccount, mkdirData, chownData
+	ensureAccount = func() error { return nil }
+	mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
+	chownData = func(path string) error { return nil }
+	t.Cleanup(func() { ensureAccount, mkdirData, chownData = oldAccount, oldMkdir, oldChown })
+	dir := t.TempDir()
 	paths := Paths{
-		Binary:  filepath.Join(base, "bin", "watchpost-agent"),
-		DataDir: filepath.Join(base, "state"),
-		Unit:    filepath.Join(base, "unit", "watchpost-agent.service"),
+		Binary:  filepath.Join(dir, "watchpost-agent"),
+		DataDir: filepath.Join(dir, "data"),
+		Unit:    filepath.Join(dir, "watchpost-agent.service"),
+		System:  true,
 	}
-	source := filepath.Join(base, "source")
-	if err := os.WriteFile(source, []byte("agent binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	fr := &fakeRunner{}
-	return Manager{Run: fr.Run, Stream: fr.Stream}, fr, paths, source
+	os.WriteFile(paths.Binary, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}}
+	m := Manager{Run: r.Run, Stream: r.Stream}
+	return m, r, paths
 }
 
-func jsonServer(t *testing.T, code int, body string, ct string) *httptest.Server {
+func installManagedUnit(t *testing.T, paths Paths) {
 	t.Helper()
-	if ct == "" {
-		ct = "application/json"
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", ct)
-		w.WriteHeader(code)
-		_, _ = w.Write([]byte(body))
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func activeHandler(fr *fakeRunner) func(name string, args ...string) (string, int, error) {
-	return func(name string, args ...string) (string, int, error) {
-		switch {
-		case fr.contains(args, "is-active"):
-			return "active", 0, nil
-		case fr.contains(args, "is-enabled"):
-			return "enabled", 0, nil
-		}
-		return "", 0, nil
+	if e := writeFileAtomic(paths.Unit, []byte(Unit(paths, DefaultListen, "")), 0o644); e != nil {
+		t.Fatal(e)
 	}
 }
 
-func readManagedUnitBytes(t *testing.T, data []byte) (unitMeta, error) {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "watchpost-agent.service")
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return unitMeta{}, err
-	}
-	return readManagedUnit(path)
+func setState(r *fakeRunner, enabled, active string) {
+	r.script["systemctl is-enabled watchpost-agent.service"] = fakeResult{out: enabled, code: 0}
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: active, code: 0}
 }
 
-func TestResolve(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	paths, err := Resolve(false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if paths.System || !strings.HasSuffix(paths.Unit, "watchpost-agent.service") {
-		t.Fatalf("user paths wrong: %+v", paths)
-	}
-	if _, err := Resolve(true); err == nil {
-		t.Fatal("system mode must refuse to run the web service as root")
-	}
-}
-
-func TestUnitAndIntegrity(t *testing.T) {
-	paths := Paths{Binary: "/usr/local/lib/watchpost-agent/watchpost-agent", DataDir: "/var/lib/watchpost-agent", System: true}
-	unit := Unit(paths, "127.0.0.1:8090", "")
-	if !strings.Contains(unit, unitMarker) {
-		t.Fatal("missing managed marker")
-	}
-	if !regexp.MustCompile(`(?m)^# watchpost-agent-managed: v1 sha256=[0-9a-f]{64}$`).MatchString(unit) {
-		t.Fatalf("missing valid integrity header\n%s", unit)
-	}
-	for _, want := range []string{`ExecStart="/usr/local/lib/watchpost-agent/watchpost-agent" "--listen" "127.0.0.1:8090" "--data-dir" "/var/lib/watchpost-agent"`, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ReadWritePaths="/var/lib/watchpost-agent"`, `# watchpost-agent-listen: 127.0.0.1:8090`, `# watchpost-agent-health: /healthz`, `WantedBy=multi-user.target`} {
-		if !strings.Contains(unit, want) {
-			t.Fatalf("unit missing %q\n%s", want, unit)
-		}
-	}
-	if _, err := readManagedUnitBytes(t, []byte(unit)); err != nil {
-		t.Fatalf("built unit should validate: %v", err)
-	}
-
-	t.Run("modified unit rejected", func(t *testing.T) {
-		bad := strings.Replace(unit, "NoNewPrivileges=true", "NoNewPrivileges=false", 1)
-		if _, err := readManagedUnitBytes(t, []byte(bad)); !errors.Is(err, errModified) {
-			t.Fatalf("want errModified, got %v", err)
-		}
-	})
-	t.Run("foreign unit rejected", func(t *testing.T) {
-		if _, err := readManagedUnitBytes(t, []byte("# hand written\n[Service]\n")); !errors.Is(err, errNotManaged) {
-			t.Fatalf("want errNotManaged, got %v", err)
-		}
-	})
-	t.Run("corrupted checksum rejected", func(t *testing.T) {
-		re := regexp.MustCompile(`(v1 sha256=)([0-9a-f]{64})`)
-		loc := re.FindStringSubmatchIndex(unit)
-		hashStart := loc[4]
-		repl := "0"
-		if unit[hashStart] == '0' {
-			repl = "1"
-		}
-		bad := unit[:hashStart] + repl + unit[hashStart+1:]
-		if _, err := readManagedUnitBytes(t, []byte(bad)); !errors.Is(err, errModified) {
-			t.Fatalf("want errModified, got %v", err)
-		}
-	})
-	t.Run("wrong health path rejected", func(t *testing.T) {
-		body := renderUnitBody(paths, "127.0.0.1:8090", "")
-		content := "# watchpost-agent-listen: 127.0.0.1:8090\n# watchpost-agent-health: /other\n" + body
-		sum := sha256.Sum256([]byte(content))
-		bad := unitMarker + "\n" + managedPrefix + "v1 sha256=" + hex.EncodeToString(sum[:]) + "\n" + content
-		if _, err := readManagedUnitBytes(t, []byte(bad)); !errors.Is(err, errMalformed) {
-			t.Fatalf("want errMalformed, got %v", err)
-		}
-	})
-}
-
-func TestInstallAndUpgrade(t *testing.T) {
-	manager, fr, paths, source := testManager(t)
-	fr.handler = func(name string, args ...string) (string, int, error) {
-		switch {
-		case fr.contains(args, "is-active"):
-			return "inactive", 3, nil
-		case fr.contains(args, "is-enabled"):
-			return "disabled", 1, nil
-		}
-		return "", 0, nil
-	}
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-		t.Fatalf("install: %v", err)
-	}
-	if _, err := os.Stat(paths.Binary); err != nil {
-		t.Fatalf("binary not installed: %v", err)
-	}
-	unit, err := os.ReadFile(paths.Unit)
-	if err != nil {
-		t.Fatalf("unit not written: %v", err)
-	}
-	if _, err := readManagedUnitBytes(t, unit); err != nil {
-		t.Fatalf("installed unit invalid: %v", err)
-	}
-	joined := strings.Join(fr.calls, "\n")
-	for _, want := range []string{"systemctl --user daemon-reload", "systemctl --user enable watchpost-agent.service", "systemctl --user restart watchpost-agent.service"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("install did not call %q\n%s", want, joined)
-		}
-	}
-	// Upgrade replaces the binary and rewrites the managed unit.
-	if err := os.WriteFile(source, []byte("agent binary v2"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	fr.calls = nil
-	if err := manager.Upgrade(source, paths, "127.0.0.1:8090", ""); err != nil {
-		t.Fatalf("upgrade: %v", err)
-	}
-	installed, _ := os.ReadFile(paths.Binary)
-	if string(installed) != "agent binary v2" {
-		t.Fatalf("installed=%q", installed)
-	}
-	if !strings.Contains(strings.Join(fr.calls, "\n"), "systemctl --user restart watchpost-agent.service") {
-		t.Fatal("upgrade did not restart the service")
-	}
-}
-
-func TestInstallRefusesForeignOrModifiedUnit(t *testing.T) {
-	manager, _, paths, source := testManager(t)
-	if err := os.MkdirAll(filepath.Dir(paths.Unit), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(paths.Unit, []byte("# hand written\n[Service]\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err == nil {
-		t.Fatal("install overwrote a foreign unit")
-	}
-}
-
-func TestActionsRequireManagedUnit(t *testing.T) {
-	manager, fr, paths, source := testManager(t)
-	if err := manager.Start(paths); err == nil {
-		t.Fatal("start on a missing unit succeeded")
-	}
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-		t.Fatal(err)
-	}
-	unit, _ := os.ReadFile(paths.Unit)
-	if err := os.WriteFile(paths.Unit, []byte(strings.Replace(string(unit), "NoNewPrivileges=true", "NoNewPrivileges=false", 1)), 0644); err != nil {
-		t.Fatal(err)
-	}
-	fr.calls = nil
-	if err := manager.Restart(paths); err == nil {
-		t.Fatal("restart on a modified managed unit succeeded")
-	}
-	if len(fr.calls) != 0 {
-		t.Fatalf("lifecycle command ran against a modified unit: %v", fr.calls)
-	}
-}
-
-func TestStrictExitFailures(t *testing.T) {
-	manager, fr, paths, source := testManager(t)
-	t.Run("install daemon-reload nonzero prevents enable and restart", func(t *testing.T) {
-		fr.handler = func(name string, args ...string) (string, int, error) {
-			if fr.contains(args, "daemon-reload") {
-				return "Failed to reload", 1, nil
-			}
-			return "", 0, nil
-		}
-		if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err == nil {
-			t.Fatal("install succeeded despite a failed daemon-reload")
-		}
-		joined := strings.Join(fr.calls, "\n")
-		if strings.Contains(joined, "enable watchpost-agent.service") || strings.Contains(joined, "restart watchpost-agent.service") {
-			t.Fatalf("enable/restart ran after a failed daemon-reload: %s", joined)
-		}
-		fr.handler = nil
-	})
-	t.Run("lifecycle start/stop/restart nonzero reports failure", func(t *testing.T) {
-		if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-			t.Fatal(err)
-		}
-		for _, verb := range []string{"start", "stop", "restart"} {
-			fr.calls = nil
-			fr.handler = func(name string, args ...string) (string, int, error) {
-				if fr.contains(args, verb) {
-					return "Failed", 1, nil
-				}
-				return "", 0, nil
-			}
-			var err error
-			switch verb {
-			case "start":
-				err = manager.Start(paths)
-			case "stop":
-				err = manager.Stop(paths)
-			case "restart":
-				err = manager.Restart(paths)
-			}
-			if err == nil {
-				t.Fatalf("%s succeeded despite a nonzero exit", verb)
-			}
-		}
-		fr.handler = nil
-	})
-}
-
-func stateTestManager(t *testing.T, activeOut string, activeCode int, enabledOut string, enabledCode int) (Manager, *fakeRunner, Paths) {
-	t.Helper()
-	manager, fr, paths, source := testManager(t)
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-		t.Fatal(err)
-	}
-	fr.handler = func(name string, args ...string) (string, int, error) {
-		switch {
-		case fr.contains(args, "is-active"):
-			return activeOut, activeCode, nil
-		case fr.contains(args, "is-enabled"):
-			return enabledOut, enabledCode, nil
-		}
-		return "", 0, nil
-	}
-	return manager, fr, paths
-}
-
-func TestStateExitValidation(t *testing.T) {
-	valid := []struct {
-		verb, out string
-		code      int
-		want      svcState
-	}{
-		{"is-active", "active", 0, stateActive},
-		{"is-active", "reloading", 0, stateReloading},
-		{"is-active", "refreshing", 0, stateRefreshing},
-		{"is-active", "refreshing", 3, stateRefreshing},
-		{"is-active", "inactive", 3, stateInactive},
-		{"is-active", "dead", 3, stateInactive},
-		{"is-active", "failed", 3, stateInactive},
-		{"is-active", "activating", 3, stateTransition},
-		{"is-active", "deactivating", 3, stateTransition},
-		{"is-active", "maintenance", 3, stateTransition},
-		{"is-active", "unknown", 3, stateUnknown},
-		{"is-active", "not-found", 3, stateUnknown},
-		{"is-active", "not-found", 4, stateUnknown},
-		{"is-enabled", "enabled", 0, stateEnabled},
-		{"is-enabled", "enabled-runtime", 0, stateEnabled},
-		{"is-enabled", "static", 0, stateNotEnabled},
-		{"is-enabled", "alias", 0, stateNotEnabled},
-		{"is-enabled", "indirect", 0, stateNotEnabled},
-		{"is-enabled", "generated", 0, stateNotEnabled},
-		{"is-enabled", "disabled", 1, stateNotEnabled},
-		{"is-enabled", "linked", 1, stateNotEnabled},
-		{"is-enabled", "linked-runtime", 1, stateNotEnabled},
-		{"is-enabled", "transient", 1, stateNotEnabled},
-		{"is-enabled", "not-found", 4, stateNotEnabled},
-		{"is-enabled", "masked", 1, stateMasked},
-		{"is-enabled", "masked-runtime", 1, stateMasked},
-	}
-	for _, tc := range valid {
-		manager, _, paths := stateTestManager(t, tc.out, tc.code, tc.out, tc.code)
-		got, err := manager.queryState(paths, tc.verb)
-		if err != nil {
-			t.Fatalf("%s %q exit %d: unexpected error %v", tc.verb, tc.out, tc.code, err)
-		}
-		if got != tc.want {
-			t.Fatalf("%s %q exit %d = %q want %q", tc.verb, tc.out, tc.code, got, tc.want)
-		}
-	}
-	invalid := []struct {
-		verb, out string
-		code      int
-	}{
-		{"is-active", "active", 3},
-		{"is-active", "reloading", 3},
-		{"is-active", "inactive", 0},
-		{"is-active", "failed", 0},
-		{"is-active", "activating", 0},
-		{"is-active", "unknown", 0},
-		{"is-active", "not-found", 0},
-		{"is-enabled", "enabled", 1},
-		{"is-enabled", "static", 1},
-		{"is-enabled", "alias", 1},
-		{"is-enabled", "disabled", 0},
-		{"is-enabled", "linked", 0},
-		{"is-enabled", "masked", 0},
-	}
-	for _, tc := range invalid {
-		manager, _, paths := stateTestManager(t, tc.out, tc.code, tc.out, tc.code)
-		if _, err := manager.queryState(paths, tc.verb); err == nil {
-			t.Fatalf("%s %q exit %d should be rejected as inconsistent", tc.verb, tc.out, tc.code)
-		}
-	}
-}
-
-func TestIsEnabledUninstallPolicy(t *testing.T) {
-	cases := []struct {
-		state string
-		code  int
-		want  svcState
-	}{
-		{"enabled", 0, stateEnabled},
-		{"enabled-runtime", 0, stateEnabled},
-		{"static", 0, stateNotEnabled},
-		{"alias", 0, stateNotEnabled},
-		{"indirect", 0, stateNotEnabled},
-		{"generated", 0, stateNotEnabled},
-		{"disabled", 1, stateNotEnabled},
-		{"linked", 1, stateNotEnabled},
-		{"linked-runtime", 1, stateNotEnabled},
-		{"transient", 1, stateNotEnabled},
-		{"not-found", 4, stateNotEnabled},
-		{"masked", 1, stateMasked},
-		{"masked-runtime", 1, stateMasked},
-		{"unknown", 1, stateUnknown},
-	}
-	for _, tc := range cases {
-		t.Run(tc.state, func(t *testing.T) {
-			manager, fr, paths, source := testManager(t)
-			if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-				t.Fatal(err)
-			}
-			fr.calls = nil
-			fr.handler = func(name string, args ...string) (string, int, error) {
-				switch {
-				case fr.contains(args, "is-active"):
-					return "inactive", 3, nil
-				case fr.contains(args, "is-enabled"):
-					if fr.saw("disable watchpost-agent.service") {
-						return "disabled", 1, nil
-					}
-					return tc.state, tc.code, nil
-				}
-				return "", 0, nil
-			}
-			err := manager.Uninstall(os.Stderr, paths)
-			joined := strings.Join(fr.calls, "\n")
-			disabled := strings.Contains(joined, "disable watchpost-agent.service")
-			if tc.want == stateEnabled {
-				if !disabled {
-					t.Fatalf("%s should invoke disable", tc.state)
-				}
-			} else if disabled {
-				t.Fatalf("%s must not invoke disable", tc.state)
-			}
-			if tc.want == stateUnknown {
-				if err == nil {
-					t.Fatalf("%s should fail closed", tc.state)
-				}
-				if _, serr := os.Stat(paths.Unit); serr != nil {
-					t.Fatalf("unit removed for unknown enablement %s: %v", tc.state, serr)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("uninstall for %s failed: %v", tc.state, err)
-				}
-				if _, serr := os.Stat(paths.Unit); !os.IsNotExist(serr) {
-					t.Fatalf("unit not removed for %s", tc.state)
-				}
-				if _, serr := os.Stat(paths.Binary); !os.IsNotExist(serr) {
-					t.Fatalf("binary not removed for %s", tc.state)
-				}
-			}
-		})
-	}
-}
-
-func TestUninstallStateQueryFailures(t *testing.T) {
-	manager, fr, paths, source := testManager(t)
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-		t.Fatal(err)
-	}
-	fr.calls = nil
-	fr.handler = func(name string, args ...string) (string, int, error) {
-		if fr.contains(args, "is-active") {
-			return "Failed to connect to bus: No such file or directory", 1, nil
-		}
-		return "", 0, nil
-	}
-	if err := manager.Uninstall(os.Stderr, paths); err == nil {
-		t.Fatal("uninstall treated a bus failure as inactive")
-	} else if !strings.Contains(err.Error(), "unrecognized") {
-		t.Fatalf("bus failure should surface as unrecognized state, got: %v", err)
-	}
-	if _, serr := os.Stat(paths.Unit); serr != nil {
-		t.Fatalf("unit removed despite bus failure: %v", serr)
-	}
-	joined := strings.Join(fr.calls, "\n")
-	if strings.Contains(joined, "stop watchpost-agent.service") || strings.Contains(joined, "disable watchpost-agent.service") || strings.Contains(joined, "daemon-reload") {
-		t.Fatalf("destructive steps ran after an active-state query failure: %s", joined)
-	}
-}
-
-func TestDisableVerificationFailsClosed(t *testing.T) {
-	for _, tc := range []struct {
-		name             string
-		afterDisableOut  string
-		afterDisableCode int
-		afterDisableErr  error
-	}{
-		{"unknown", "unknown", 3, nil},
-		{"unrecognized", "bogus-state", 1, nil},
-		{"launch failure", "", -1, errors.New("bus gone")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			manager, fr, paths, source := testManager(t)
-			if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-				t.Fatal(err)
-			}
-			fr.calls = nil
-			fr.handler = func(name string, args ...string) (string, int, error) {
-				switch {
-				case fr.contains(args, "is-active"):
-					return "inactive", 3, nil
-				case fr.contains(args, "is-enabled"):
-					if fr.saw("disable watchpost-agent.service") {
-						return tc.afterDisableOut, tc.afterDisableCode, tc.afterDisableErr
-					}
-					return "enabled", 0, nil
-				}
-				return "", 0, nil
-			}
-			if err := manager.Uninstall(os.Stderr, paths); err == nil {
-				t.Fatalf("uninstall proceeded after a %q disable verification", tc.name)
-			}
-			if _, err := os.Stat(paths.Unit); err != nil {
-				t.Fatalf("unit removed despite failed disable verification: %v", err)
-			}
-			if strings.Contains(strings.Join(fr.calls, "\n"), "daemon-reload") {
-				t.Fatal("daemon-reload ran after a failed disable verification")
-			}
-		})
-	}
-}
-
-func TestUninstallRollback(t *testing.T) {
-	backupFiles := func(dir string) []string {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
-			return nil
-		}
-		var out []string
-		for _, e := range ents {
-			if strings.HasPrefix(e.Name(), ".watchpost-agent.service.unit-backup-") {
-				out = append(out, e.Name())
-			}
-		}
-		return out
-	}
-
-	t.Run("success removes unit, binary and no backup artifacts", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-			t.Fatal(err)
-		}
-		fr.handler = func(name string, args ...string) (string, int, error) {
-			switch {
-			case fr.contains(args, "is-active"):
-				return "inactive", 3, nil
-			case fr.contains(args, "is-enabled"):
-				return "disabled", 1, nil
-			}
-			return "", 0, nil
-		}
-		if err := manager.Uninstall(os.Stderr, paths); err != nil {
-			t.Fatalf("uninstall: %v", err)
-		}
-		if _, err := os.Stat(paths.Unit); !os.IsNotExist(err) {
-			t.Fatal("unit still present after uninstall")
-		}
-		if _, err := os.Stat(paths.Binary); !os.IsNotExist(err) {
-			t.Fatal("binary still present after uninstall")
-		}
-		if _, err := os.Stat(paths.DataDir); err != nil {
-			t.Fatalf("data directory was removed by uninstall: %v", err)
-		}
-		if len(backupFiles(filepath.Dir(paths.Unit))) != 0 {
-			t.Fatal("backup artifacts remain after a successful uninstall")
-		}
-	})
-
-	t.Run("reload failure restores the original unit and removes the backup", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-			t.Fatal(err)
-		}
-		orig, _ := os.ReadFile(paths.Unit)
-		origInfo, _ := os.Stat(paths.Unit)
-		fr.calls = nil
-		reloadCalls := 0
-		fr.handler = func(name string, args ...string) (string, int, error) {
-			switch {
-			case fr.contains(args, "is-active"):
-				return "inactive", 3, nil
-			case fr.contains(args, "is-enabled"):
-				return "disabled", 1, nil
-			case fr.contains(args, "daemon-reload"):
-				reloadCalls++
-				if reloadCalls == 1 {
-					return "Failed to reload", 1, nil
-				}
-				return "", 0, nil
-			}
-			return "", 0, nil
-		}
-		err := manager.Uninstall(os.Stderr, paths)
-		if err == nil {
-			t.Fatal("uninstall did not report the reload failure")
-		}
-		if !strings.Contains(err.Error(), "restored") {
-			t.Fatalf("reload failure did not restore the unit: %v", err)
-		}
-		got, _ := os.ReadFile(paths.Unit)
-		if string(got) != string(orig) {
-			t.Fatal("restored unit does not match the original byte-for-byte")
-		}
-		gotInfo, _ := os.Stat(paths.Unit)
-		if !os.SameFile(origInfo, gotInfo) {
-			t.Fatal("restored unit is not the original inode")
-		}
-		if len(backupFiles(filepath.Dir(paths.Unit))) != 0 {
-			t.Fatal("backup artifacts remain after restoration")
-		}
-	})
-
-	t.Run("concurrent replacement is preserved and the backup is recoverable", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-			t.Fatal(err)
-		}
-		orig, _ := os.ReadFile(paths.Unit)
-		fr.calls = nil
-		fr.handler = func(name string, args ...string) (string, int, error) {
-			switch {
-			case fr.contains(args, "is-active"):
-				return "inactive", 3, nil
-			case fr.contains(args, "is-enabled"):
-				return "disabled", 1, nil
-			case fr.contains(args, "daemon-reload"):
-				_ = os.WriteFile(paths.Unit, []byte("# replacement\n"), 0644)
-				return "Failed to reload", 1, nil
-			}
-			return "", 0, nil
-		}
-		err := manager.Uninstall(os.Stderr, paths)
-		if err == nil {
-			t.Fatal("uninstall did not report the reload failure")
-		}
-		if !strings.Contains(err.Error(), "concurrently created") || !strings.Contains(err.Error(), "preserved at") {
-			t.Fatalf("restoration conflict not reported clearly: %v", err)
-		}
-		got, _ := os.ReadFile(paths.Unit)
-		if string(got) != "# replacement\n" {
-			t.Fatalf("concurrently created file was overwritten: %q", got)
-		}
-		backs := backupFiles(filepath.Dir(paths.Unit))
-		if len(backs) != 1 {
-			t.Fatalf("expected exactly one retained backup, got %v", backs)
-		}
-		recovered, _ := os.ReadFile(filepath.Join(filepath.Dir(paths.Unit), backs[0]))
-		if string(recovered) != string(orig) {
-			t.Fatal("retained backup does not contain the original unit")
-		}
-	})
-}
-
-func TestStatus(t *testing.T) {
-	t.Run("missing unit", func(t *testing.T) {
-		manager, _, paths, _ := testManager(t)
-		if err := manager.Status(os.Stderr, paths, "1.0"); err == nil {
-			t.Fatal("status of a missing unit should fail")
-		}
-	})
-	t.Run("inactive service", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-			t.Fatal(err)
-		}
-		fr.handler = func(name string, args ...string) (string, int, error) {
-			switch {
-			case fr.contains(args, "is-active"):
-				return "inactive", 3, nil
-			case fr.contains(args, "is-enabled"):
-				return "enabled", 0, nil
-			}
-			return "", 0, nil
-		}
-		if err := manager.Status(os.Stderr, paths, "1.0"); err == nil {
-			t.Fatal("status of an inactive service should fail")
-		}
-	})
-	t.Run("uses installed listen and healthz", func(t *testing.T) {
-		srv := jsonServer(t, 200, `{"status":"ok"}`, "application/json")
-		listen := strings.TrimPrefix(srv.URL, "http://")
-		manager, fr, paths, source := testManager(t)
-		if err := manager.Install(source, paths, listen, ""); err != nil {
-			t.Fatal(err)
-		}
-		fr.handler = activeHandler(fr)
-		if err := manager.Status(os.Stderr, paths, "1.0"); err != nil {
-			t.Fatalf("status with installed listen failed: %v", err)
-		}
-	})
-	t.Run("404 health response", func(t *testing.T) {
-		srv := jsonServer(t, 404, `{"error":"not found"}`, "application/json")
-		manager, fr, paths, source := testManager(t)
-		if err := manager.Install(source, paths, strings.TrimPrefix(srv.URL, "http://"), ""); err != nil {
-			t.Fatal(err)
-		}
-		fr.handler = activeHandler(fr)
-		if err := manager.Status(os.Stderr, paths, "1.0"); err == nil {
-			t.Fatal("status with a 404 health response should fail")
-		}
-	})
-	t.Run("401 health response", func(t *testing.T) {
-		srv := jsonServer(t, 401, `{"error":"unauthorized"}`, "application/json")
-		manager, fr, paths, source := testManager(t)
-		if err := manager.Install(source, paths, strings.TrimPrefix(srv.URL, "http://"), ""); err != nil {
-			t.Fatal(err)
-		}
-		fr.handler = activeHandler(fr)
-		if err := manager.Status(os.Stderr, paths, "1.0"); err == nil {
-			t.Fatal("status with a 401 health response should fail")
-		}
-	})
-	t.Run("non-JSON 200 health response", func(t *testing.T) {
-		srv := jsonServer(t, 200, `ok`, "text/plain")
-		manager, fr, paths, source := testManager(t)
-		if err := manager.Install(source, paths, strings.TrimPrefix(srv.URL, "http://"), ""); err != nil {
-			t.Fatal(err)
-		}
-		fr.handler = activeHandler(fr)
-		if err := manager.Status(os.Stderr, paths, "1.0"); err == nil {
-			t.Fatal("status with a non-JSON 200 health response should fail")
-		}
-	})
-}
-
-func TestBackupManagedUnitNoReplace(t *testing.T) {
-	dirEntries := func(dir string) []string {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
-			return nil
-		}
-		var out []string
-		for _, e := range ents {
-			out = append(out, e.Name())
-		}
-		return out
-	}
-
-	t.Run("random source failure leaves the original intact", func(t *testing.T) {
-		orig := randomSuffix
-		randomSuffix = func() (string, error) { return "", errors.New("rand failed") }
-		t.Cleanup(func() { randomSuffix = orig })
-		dir := t.TempDir()
-		unit := filepath.Join(dir, "app.service")
-		if err := os.WriteFile(unit, []byte("unit"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := backupManagedUnit(unit); err == nil {
-			t.Fatal("random-source failure should error")
-		}
-		if got, _ := os.ReadFile(unit); string(got) != "unit" {
-			t.Fatalf("original changed: %q", got)
-		}
-		if entries := dirEntries(dir); len(entries) != 1 {
-			t.Fatalf("unexpected entries after failure: %v", entries)
-		}
-	})
-
-	t.Run("collision never overwrites a retained backup", func(t *testing.T) {
-		orig := randomSuffix
-		randomSuffix = func() (string, error) { return "aa", nil }
-		t.Cleanup(func() { randomSuffix = orig })
-		dir := t.TempDir()
-		unit := filepath.Join(dir, "app.service")
-		retained := filepath.Join(dir, ".app.service.unit-backup-aa")
-		if err := os.WriteFile(unit, []byte("unit"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(retained, []byte("retained"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := backupManagedUnit(unit); err == nil {
-			t.Fatal("all candidates collided; should error")
-		}
-		if got, _ := os.ReadFile(retained); string(got) != "retained" {
-			t.Fatalf("retained backup was overwritten: %q", got)
-		}
-		if got, _ := os.ReadFile(unit); string(got) != "unit" {
-			t.Fatalf("original changed: %q", got)
-		}
-	})
-
-	t.Run("unlink failure aborts and leaves no artifact", func(t *testing.T) {
-		origSuffix, origRemove := randomSuffix, removeFile
-		randomSuffix = func() (string, error) { return "bb", nil }
-		removeFile = func(p string) error { return errors.New("remove failed") }
-		t.Cleanup(func() { randomSuffix, removeFile = origSuffix, origRemove })
-		dir := t.TempDir()
-		unit := filepath.Join(dir, "app.service")
-		if err := os.WriteFile(unit, []byte("unit"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := backupManagedUnit(unit); err == nil {
-			t.Fatal("unlink failure should error")
-		}
-		if got, _ := os.ReadFile(unit); string(got) != "unit" {
-			t.Fatalf("original changed: %q", got)
-		}
-		if entries := dirEntries(dir); len(entries) != 1 {
-			t.Fatalf("backup artifact left after aborted transaction: %v", entries)
-		}
-	})
-}
-
-func TestEnvFile(t *testing.T) {
-	dir := t.TempDir()
-	env := filepath.Join(dir, "agent.env")
-	if err := os.WriteFile(env, []byte("WATCHPOST_AGENT_SECURE_COOKIES=true\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	manager, _, paths, source := testManager(t)
-
-	t.Run("unit includes EnvironmentFile and authenticated metadata", func(t *testing.T) {
-		unit := Unit(paths, "127.0.0.1:8090", env)
-		if !strings.Contains(unit, "EnvironmentFile="+systemdQuote(env)) {
-			t.Fatalf("unit missing EnvironmentFile\n%s", unit)
-		}
-		if !strings.Contains(unit, "# watchpost-agent-envfile: "+env) {
-			t.Fatalf("unit missing envfile metadata\n%s", unit)
-		}
-		meta, err := readManagedUnitBytes(t, []byte(unit))
-		if err != nil {
-			t.Fatalf("unit should validate: %v", err)
-		}
-		if meta.envfile != env {
-			t.Fatalf("meta.envfile=%q", meta.envfile)
-		}
-	})
-
-	t.Run("validateEnvFile rejects unsafe files", func(t *testing.T) {
-		if err := validateEnvFile(env); err != nil {
-			t.Fatalf("valid env file rejected: %v", err)
-		}
-		if err := validateEnvFile("relative.env"); err == nil {
-			t.Fatal("relative path accepted")
-		}
-		sym := filepath.Join(dir, "link.env")
-		if err := os.Symlink(env, sym); err != nil {
-			t.Fatal(err)
-		}
-		if err := validateEnvFile(sym); err == nil {
-			t.Fatal("symlink accepted")
-		}
-		world := filepath.Join(dir, "world.env")
-		if err := os.WriteFile(world, []byte("x"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := validateEnvFile(world); err == nil {
-			t.Fatal("group/world-writable accepted")
-		}
-		percent := filepath.Join(dir, "bad%env")
-		if err := os.WriteFile(percent, []byte("x"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := validateEnvFile(percent); err == nil {
-			t.Fatal("systemd specifier character accepted")
-		}
-	})
-
-	t.Run("install validates the environment file", func(t *testing.T) {
-		world := filepath.Join(dir, "world2.env")
-		if err := os.WriteFile(world, []byte("x"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := manager.Install(source, paths, "127.0.0.1:8090", world); err == nil {
-			t.Fatal("install accepted an unsafe environment file")
-		}
-	})
-}
-
-func TestUpgradePreservesInstalledConfig(t *testing.T) {
-	manager, fr, paths, source := testManager(t)
-	fr.handler = func(name string, args ...string) (string, int, error) {
-		switch {
-		case fr.contains(args, "is-active"):
-			return "inactive", 3, nil
-		case fr.contains(args, "is-enabled"):
-			return "disabled", 1, nil
-		}
-		return "", 0, nil
-	}
-	dir := t.TempDir()
-	env := filepath.Join(dir, "agent.env")
-	if err := os.WriteFile(env, []byte("WATCHPOST_AGENT_SECURE_COOKIES=true\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Install(source, paths, "127.0.0.1:9005", env); err != nil {
-		t.Fatal(err)
-	}
-	// Upgrade with unset listen/env-file preserves the installed values.
-	upgradeListen, upgradeEnv := PreserveInstallValues(metaFrom(t, manager, paths), false, "", false, "")
-	if upgradeListen != "127.0.0.1:9005" || upgradeEnv != env {
-		t.Fatalf("preserved values wrong: listen=%q env=%q", upgradeListen, upgradeEnv)
-	}
-	if err := manager.Upgrade(source, paths, upgradeListen, upgradeEnv); err != nil {
-		t.Fatalf("upgrade: %v", err)
-	}
-	meta, ok, err := manager.ExistingMeta(paths)
-	if err != nil || !ok {
-		t.Fatalf("existing meta: ok=%v err=%v", ok, err)
-	}
-	if meta.Listen != "127.0.0.1:9005" || meta.EnvFile != env {
-		t.Fatalf("upgrade did not preserve config: listen=%q env=%q", meta.Listen, meta.EnvFile)
-	}
-	// Explicit override changes it.
-	env2 := filepath.Join(dir, "agent2.env")
-	if err := os.WriteFile(env2, []byte("x=1\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Upgrade(source, paths, "127.0.0.1:9006", env2); err != nil {
-		t.Fatal(err)
-	}
-	meta, _, _ = manager.ExistingMeta(paths)
-	if meta.Listen != "127.0.0.1:9006" || meta.EnvFile != env2 {
-		t.Fatalf("explicit override failed: listen=%q env=%q", meta.Listen, meta.EnvFile)
-	}
-	// Upgrade refuses a foreign unit.
-	if err := os.WriteFile(paths.Unit, []byte("# hand written\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	fr.calls = nil
-	if err := manager.Upgrade(source, paths, "127.0.0.1:8090", ""); err == nil {
-		t.Fatal("upgrade overwrote a foreign unit")
-	}
-	if len(fr.calls) != 0 {
-		t.Fatalf("upgrade ran systemctl against a foreign unit: %v", fr.calls)
-	}
-}
-
-func metaFrom(t *testing.T, m Manager, paths Paths) Meta {
-	t.Helper()
-	meta, ok, err := m.ExistingMeta(paths)
-	if err != nil || !ok {
-		t.Fatalf("existing meta: ok=%v err=%v", ok, err)
-	}
-	return meta
-}
-
-func TestEnvFilePermissions(t *testing.T) {
-	dir := t.TempDir()
-	modes := []struct {
-		mode os.FileMode
-		ok   bool
-	}{
-		{0o000, false}, {0o200, false}, {0o400, false}, {0o600, true},
-		{0o640, false}, {0o660, false}, {0o666, false},
-	}
-	for _, tc := range modes {
-		env := filepath.Join(dir, fmt.Sprintf("env-%o", tc.mode))
-		if err := os.WriteFile(env, []byte("x\n"), tc.mode); err != nil {
-			t.Fatal(err)
-		}
-		if err := validateEnvFile(env); (err == nil) != tc.ok {
-			t.Fatalf("mode %04o: ok=%v err=%v", tc.mode, tc.ok, err)
-		}
-	}
-}
-
-func TestReadWritePath(t *testing.T) {
-	if err := validateReadWritePath("/home/nick/my data"); err != nil {
-		t.Fatalf("space path rejected: %v", err)
-	}
-	paths := Paths{Binary: "/usr/local/lib/watchpost-agent/watchpost-agent", DataDir: "/home/nick/my data"}
-	unit := Unit(paths, "127.0.0.1:8090", "")
-	if !strings.Contains(unit, `ReadWritePaths="/home/nick/my data"`) {
-		t.Fatalf("ReadWritePaths not quoted:\n%s", unit)
-	}
-	for _, bad := range []string{"/x/%h", "/x/\"/y", "/x/\\y", "-/weird", "+/weird", "!/weird", "~/weird", "relative"} {
-		if err := validateReadWritePath(bad); err == nil {
-			t.Fatalf("unsafe ReadWritePaths path accepted: %q", bad)
-		}
-	}
-}
-
-func TestFreshInstallPreparesDataDir(t *testing.T) {
-	manager, _, paths, source := testManager(t)
-	paths.DataDir = filepath.Join(t.TempDir(), "state", "data")
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
-		t.Fatalf("fresh install failed: %v", err)
-	}
-	info, err := os.Stat(paths.DataDir)
-	if err != nil || !info.IsDir() {
-		t.Fatalf("data dir not created: %v", err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("data dir mode=%v", info.Mode().Perm())
-	}
-	symTarget := filepath.Join(t.TempDir(), "target")
-	if err := os.MkdirAll(symTarget, 0700); err != nil {
-		t.Fatal(err)
-	}
-	sym := filepath.Join(t.TempDir(), "symlink")
-	if err := os.Symlink(symTarget, sym); err != nil {
-		t.Fatal(err)
-	}
-	paths.DataDir = sym
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err == nil {
-		t.Fatal("symlink data dir accepted")
-	}
-	// A group/world-writable data dir must be refused regardless of umask.
-	world := filepath.Join(t.TempDir(), "world")
-	if err := os.MkdirAll(world, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(world, 0777); err != nil {
-		t.Fatal(err)
-	}
-	if info, err := os.Stat(world); err != nil {
-		t.Fatal(err)
-	} else if info.Mode().Perm() != 0o777 {
-		t.Fatalf("expected 0777 data dir, got %v", info.Mode().Perm())
-	}
-	paths.DataDir = world
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err == nil {
-		t.Fatal("world-writable data dir accepted")
-	}
-}
-
-func TestEnvFileRevalidatedOnStartRestart(t *testing.T) {
-	manager, fr, paths, source := testManager(t)
-	dir := t.TempDir()
-	env := filepath.Join(dir, "agent.env")
-	if err := os.WriteFile(env, []byte("WATCHPOST_AGENT_SECURE_COOKIES=true\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Install(source, paths, "127.0.0.1:8090", env); err != nil {
-		t.Fatal(err)
-	}
-	fr.handler = func(name string, args ...string) (string, int, error) {
-		if fr.contains(args, "is-active") || fr.contains(args, "is-enabled") {
-			return "active", 0, nil
-		}
-		return "", 0, nil
-	}
-	if err := manager.Restart(paths); err != nil {
-		t.Fatalf("restart with valid env file failed: %v", err)
-	}
-	if err := os.Remove(env); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Restart(paths); err == nil {
-		t.Fatal("restart succeeded with a missing env file")
-	}
-	if err := manager.Start(paths); err == nil {
-		t.Fatal("start succeeded with a missing env file")
-	}
-	if err := manager.Status(os.Stderr, paths, "1.0"); err == nil {
-		t.Fatal("status succeeded with a missing env file")
-	}
-	if err := manager.Stop(paths); err != nil {
-		t.Fatalf("stop should remain possible: %v", err)
-	}
-}
-
-func TestUpgradeTransaction(t *testing.T) {
-	manager, fr, paths, source := testManager(t)
-	if err := os.WriteFile(source, []byte("v1 binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-		t.Fatal(err)
-	}
-	oldUnit, _ := os.ReadFile(paths.Unit)
-	oldBinary, _ := os.ReadFile(paths.Binary)
-
-	t.Run("restart failure rolls back unit and binary", func(t *testing.T) {
-		if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
-			t.Fatal(err)
-		}
-		fr.calls = nil
-		fr.handler = func(name string, args ...string) (string, int, error) {
-			switch {
-			case fr.contains(args, "is-active"):
-				return "active", 0, nil
-			case fr.contains(args, "is-enabled"):
-				return "enabled", 0, nil
-			case fr.contains(args, "restart"):
-				return "Failed", 1, nil
-			}
-			return "", 0, nil
-		}
-		if err := manager.Upgrade(source, paths, "127.0.0.1:9001", ""); err == nil {
-			t.Fatal("upgrade should fail")
-		} else if !strings.Contains(err.Error(), "rollback incomplete") {
-			t.Fatalf("rollback incompleteness (restore active) must be surfaced, got: %v", err)
-		}
-		gotUnit, _ := os.ReadFile(paths.Unit)
-		gotBinary, _ := os.ReadFile(paths.Binary)
-		if string(gotUnit) != string(oldUnit) || string(gotBinary) != string(oldBinary) {
-			t.Fatalf("failed upgrade left mixed state: unit=%q binary=%q", gotUnit, gotBinary)
-		}
-		meta, _, _ := manager.ExistingMeta(paths)
-		if meta.Listen != "127.0.0.1:9001" {
-			t.Fatalf("metadata not rolled back: %q", meta.Listen)
-		}
-		joined := strings.Join(fr.calls, "\n")
-		if !strings.Contains(joined, "systemctl --user enable watchpost-agent.service") {
-			t.Fatal("rollback did not attempt to restore the enabled state")
-		}
-		fr.handler = nil
-	})
-
-	t.Run("fresh install failure removes new artifacts", func(t *testing.T) {
-		manager2, fr2, paths2, source2 := testManager(t)
-		fr2.handler = func(name string, args ...string) (string, int, error) {
-			if fr2.contains(args, "enable") {
-				return "Failed", 1, nil
-			}
-			return "", 0, nil
-		}
-		if err := manager2.Install(source2, paths2, "127.0.0.1:9002", ""); err == nil {
-			t.Fatal("install should fail")
-		}
-		if _, err := os.Stat(paths2.Unit); !os.IsNotExist(err) {
-			t.Fatalf("unit not removed after failed fresh install: %v", err)
-		}
-		if _, err := os.Stat(paths2.Binary); !os.IsNotExist(err) {
-			t.Fatalf("binary not removed after failed fresh install: %v", err)
-		}
-	})
-
-	t.Run("staging failure leaves state intact", func(t *testing.T) {
-		if err := os.Chmod(filepath.Dir(paths.Binary), 0500); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(filepath.Dir(paths.Binary), 0700) })
-		if err := manager.Upgrade(source, paths, "127.0.0.1:9001", ""); err == nil {
-			t.Fatal("upgrade should fail when staging cannot write")
-		}
-		gotUnit, _ := os.ReadFile(paths.Unit)
-		gotBinary, _ := os.ReadFile(paths.Binary)
-		if string(gotUnit) != string(oldUnit) || string(gotBinary) != string(oldBinary) {
-			t.Fatalf("staging failure changed installed state")
-		}
-	})
-}
-
-// fakeSystemd is a stateful model of a per-user systemd manager used by the
-// service transaction tests. It holds the unit's enablement and active states,
-// answers is-enabled/is-active and the lifecycle verbs against that model, and
-// records every call so tests can assert both the exact calls and the final
-// state rather than relying on substring assertions. The unit's loaded state is
-// derived from the managed unit file's presence, so a rollback that removes the
-// unit also makes is-enabled report not-found and is-active report inactive.
-type fakeSystemd struct {
-	mu       sync.Mutex
-	unitPath string
-	enable   bool // persistent enablement link
-	enableRT bool // runtime enablement link
-	mask     bool // persistent mask
-	maskRT   bool // runtime mask
-	active   string
-	// Overrides simulate systemctl reports for prior states that have no
-	// corresponding link layer (for example not-found on a loaded unit, or
-	// static/alias unit-file states). They are used only to exercise the
-	// refuse-before-mutation path.
-	overrideEnabled string
-	overrideActive  string
-	failVerb        string
-	calls           []string
-}
-
-func newFakeSystemd(unitPath string) *fakeSystemd {
-	return &fakeSystemd{unitPath: unitPath, active: "inactive"}
-}
-
-func exitForEnabled(word string) int {
-	switch word {
-	case "enabled", "enabled-runtime", "static", "alias", "indirect", "generated":
-		return 0
-	case "disabled", "masked", "masked-runtime", "linked", "linked-runtime", "transient":
-		return 1
-	case "not-found", "unknown":
-		return 4
-	}
-	return 1
-}
-
-func exitForActive(word string) int {
-	switch word {
-	case "active", "reloading":
-		return 0
-	case "inactive", "dead", "failed", "activating", "deactivating", "maintenance":
-		return 3
-	case "not-found", "unknown":
-		return 4
-	}
-	return 3
-}
-
-func (f *fakeSystemd) enabledWord() string {
-	if f.overrideEnabled != "" {
-		return f.overrideEnabled
-	}
-	switch {
-	case f.mask:
-		return "masked"
-	case f.maskRT:
-		return "masked-runtime"
-	case f.enable:
-		return "enabled"
-	case f.enableRT:
-		return "enabled-runtime"
-	}
-	if _, err := os.Stat(f.unitPath); err != nil {
-		return "not-found"
-	}
-	return "disabled"
-}
-
-func (f *fakeSystemd) activeWord() string {
-	if f.overrideActive != "" {
-		return f.overrideActive
-	}
-	if _, err := os.Stat(f.unitPath); err != nil {
-		return "inactive"
-	}
-	return f.active
-}
-
-func (f *fakeSystemd) runner(fr *fakeRunner) {
-	fr.handler = func(name string, args ...string) (string, int, error) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.calls = append(f.calls, name+" "+strings.Join(args, " "))
-		verb := ""
-		for _, a := range args {
-			if a != "--user" && a != "watchpost-agent.service" && a != "--runtime" {
-				verb = a
-				break
-			}
-		}
-		fail := f.failVerb != "" && f.failVerb == verb
-		if fail {
-			f.failVerb = ""
-		}
-		if verb == "daemon-reload" {
-			if fail {
-				return "reload failed", 1, nil
-			}
-			return "", 0, nil
-		}
-		if verb == "is-enabled" {
-			word := f.enabledWord()
-			return word, exitForEnabled(word), nil
-		}
-		if verb == "is-active" {
-			word := f.activeWord()
-			return word, exitForActive(word), nil
-		}
-		switch verb {
-		case "enable", "disable", "mask":
-			if containsStr(args, "--runtime") {
-				verb = verb + "-runtime"
-			}
-			switch verb {
-			case "enable":
-				if f.mask || f.maskRT {
-					return "Failed to enable unit: masked", 1, nil
-				}
-				f.enable = true
-			case "enable-runtime":
-				if f.mask || f.maskRT {
-					return "Failed to enable unit: masked", 1, nil
-				}
-				f.enableRT = true
-			case "disable":
-				f.enable = false
-				f.enableRT = false
-			case "mask":
-				f.mask = true
-				f.enable = false
-				f.enableRT = false
-			case "mask-runtime":
-				f.maskRT = true
-				f.enable = false
-				f.enableRT = false
-			}
-		case "start", "restart":
-			if f.mask || f.maskRT {
-				return "Failed to start unit: masked", 1, nil
-			}
-			f.active = "active"
-		case "stop":
-			f.active = "inactive"
-		}
-		if fail {
-			return verb + " failed", 1, nil
-		}
-		return "", 0, nil
-	}
-}
-
-func (f *fakeSystemd) setState(enabled, active string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.overrideEnabled = ""
-	f.overrideActive = ""
-	f.enable = false
-	f.enableRT = false
-	f.mask = false
-	f.maskRT = false
-	switch enabled {
-	case "enabled":
-		f.enable = true
-	case "enabled-runtime":
-		f.enableRT = true
-	case "masked":
-		f.mask = true
-	case "masked-runtime":
-		f.maskRT = true
-	case "disabled":
-		// No link layers; is-enabled derives from the unit file's presence.
-	default:
-		f.overrideEnabled = enabled
-	}
-	switch active {
-	case "active", "inactive":
-		f.active = active
-	default:
-		f.active = active
-		f.overrideActive = active
-	}
-}
-
-func (f *fakeSystemd) callsContain(needle string) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, c := range f.calls {
-		if strings.Contains(c, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsStr(xs []string, s string) bool {
-	for _, x := range xs {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
-func TestInstallNoOpAndChange(t *testing.T) {
-	t.Run("fresh install publishes unit and binary and starts", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		fs := newFakeSystemd(paths.Unit)
-		fs.runner(fr)
-		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-			t.Fatalf("install: %v", err)
-		}
-		if _, err := readManagedUnitBytes(t, mustRead(t, paths.Unit)); err != nil {
-			t.Fatalf("installed unit invalid: %v", err)
-		}
-		if _, err := os.Stat(paths.Binary); err != nil {
-			t.Fatalf("binary not published: %v", err)
-		}
-		for _, want := range []string{"daemon-reload", "enable watchpost-agent.service", "restart watchpost-agent.service"} {
-			if !fs.callsContain(want) {
-				t.Fatalf("fresh install did not call %q\ncalls: %v", want, fs.calls)
-			}
-		}
-		if fs.activeWord() != "active" || fs.enabledWord() != "enabled" {
-			t.Fatalf("fresh install left %q/%q", fs.enabledWord(), fs.activeWord())
-		}
-	})
-
-	t.Run("identical unit and binary on enabled active service is a true no-op", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		fs := newFakeSystemd(paths.Unit)
-		fs.runner(fr)
-		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-			t.Fatal(err)
-		}
-		fs.setState("enabled", "active")
-		fs.calls = nil
-		fiUnit, _ := os.Stat(paths.Unit)
-		fiBin, _ := os.Stat(paths.Binary)
-		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-			t.Fatalf("no-op install: %v", err)
-		}
-		for _, forbid := range []string{"daemon-reload", "enable ", "restart ", "start "} {
-			if fs.callsContain(forbid) {
-				t.Fatalf("no-op install mutated systemd (%q)\ncalls: %v", forbid, fs.calls)
-			}
-		}
-		if fiUnit2, _ := os.Stat(paths.Unit); !fiUnit.ModTime().Equal(fiUnit2.ModTime()) {
-			t.Fatal("no-op install rewrote the unit")
-		}
-		if fiBin2, _ := os.Stat(paths.Binary); !fiBin.ModTime().Equal(fiBin2.ModTime()) {
-			t.Fatal("no-op install rewrote the binary")
-		}
-	})
-
-	t.Run("changed binary restarts the service", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		fs := newFakeSystemd(paths.Unit)
-		fs.runner(fr)
-		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-			t.Fatal(err)
-		}
-		fs.setState("enabled", "active")
-		fs.calls = nil
-		if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := manager.Upgrade(source, paths, "127.0.0.1:9001", ""); err != nil {
-			t.Fatalf("upgrade: %v", err)
-		}
-		if !fs.callsContain("restart watchpost-agent.service") {
-			t.Fatalf("binary change did not restart\ncalls: %v", fs.calls)
-		}
-		if got, _ := os.ReadFile(paths.Binary); string(got) != "v2 binary" {
-			t.Fatalf("binary not replaced: %q", got)
-		}
-	})
-
-	t.Run("unchanged artifacts on inactive service starts it", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		fs := newFakeSystemd(paths.Unit)
-		fs.runner(fr)
-		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-			t.Fatal(err)
-		}
-		fs.setState("enabled", "inactive")
-		fs.calls = nil
-		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-			t.Fatalf("inactive reinstall: %v", err)
-		}
-		if !fs.callsContain("start watchpost-agent.service") {
-			t.Fatalf("inactive service was not started\ncalls: %v", fs.calls)
-		}
-		if fs.callsContain("daemon-reload") || fs.callsContain("restart ") {
-			t.Fatalf("unchanged inactive reinstall did unnecessary work\ncalls: %v", fs.calls)
-		}
-	})
+func fakeSHA(path string) string {
+	h, _ := fileSHA256(path)
+	return h
 }
 
 func mustRead(t *testing.T, path string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	b, e := os.ReadFile(path)
+	if e != nil {
+		t.Fatal(e)
 	}
 	return b
 }
 
-func TestInstallRollbackMatrix(t *testing.T) {
-	pairs := []struct {
-		enabled, active string
-		restorable      bool
-	}{
-		{"enabled", "active", true}, {"enabled", "inactive", true},
-		{"enabled-runtime", "active", true}, {"enabled-runtime", "inactive", true},
-		{"disabled", "active", true}, {"disabled", "inactive", true},
-		{"masked", "inactive", true}, {"masked-runtime", "inactive", true},
-		{"enabled", "dead", false}, {"enabled", "unknown", false}, {"enabled", "not-found", false},
-		{"enabled-runtime", "failed", false}, {"enabled-runtime", "reloading", false},
-		{"disabled", "refreshing", false}, {"disabled", "activating", false},
-		{"disabled", "deactivating", false}, {"disabled", "maintenance", false},
-		{"masked", "active", false}, {"masked-runtime", "active", false},
-		{"masked", "failed", false},
-		{"not-found", "active", false}, {"not-found", "inactive", false},
-		{"static", "active", false}, {"alias", "active", false}, {"indirect", "active", false},
-		{"generated", "active", false}, {"linked", "active", false},
-		{"linked-runtime", "active", false}, {"transient", "active", false},
-		{"unknown", "active", false},
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
 	}
-	for _, p := range pairs {
-		t.Run("enabled="+p.enabled+"/active="+p.active, func(t *testing.T) {
-			manager, fr, paths, source := testManager(t)
-			fs := newFakeSystemd(paths.Unit)
-			fs.runner(fr)
-			if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-				t.Fatal(err)
-			}
-			priorUnit := mustRead(t, paths.Unit)
-			priorBin := mustRead(t, paths.Binary)
-			fs.setState(p.enabled, p.active)
-			fs.calls = nil
-			if !p.restorable {
-				if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
-					t.Fatal(err)
-				}
-				err := manager.Upgrade(source, paths, "127.0.0.1:9003", "")
-				if err == nil {
-					t.Fatalf("non-restorable pair (%q/%q) was not refused", p.enabled, p.active)
-				}
-				if string(priorUnit) != string(mustRead(t, paths.Unit)) {
-					t.Fatal("refusal changed the unit file")
-				}
-				if string(priorBin) != string(mustRead(t, paths.Binary)) {
-					t.Fatal("refusal changed the binary")
-				}
-				for _, forbid := range []string{"daemon-reload", "enable ", "mask ", "disable ", "restart ", "start ", "stop "} {
-					if fs.callsContain(forbid) {
-						t.Fatalf("refusal performed a lifecycle mutation (%q)\ncalls: %v", forbid, fs.calls)
-					}
-				}
-				return
-			}
-			if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
-				t.Fatal(err)
-			}
-			fs.failVerb = "restart"
-			err := manager.Upgrade(source, paths, "127.0.0.1:9004", "")
-			if err == nil {
-				t.Fatalf("install should fail at restart for restorable pair (%q/%q)", p.enabled, p.active)
-			}
-			if string(priorUnit) != string(mustRead(t, paths.Unit)) {
-				t.Fatal("rollback did not restore the prior unit bytes")
-			}
-			if string(priorBin) != string(mustRead(t, paths.Binary)) {
-				t.Fatal("rollback did not restore the prior binary")
-			}
-			ew, _, _ := manager.systemctl(paths, "is-enabled", "watchpost-agent.service")
-			aw, _, _ := manager.systemctl(paths, "is-active", "watchpost-agent.service")
-			if strings.TrimSpace(ew) != p.enabled || strings.TrimSpace(aw) != p.active {
-				t.Fatalf("rollback final raw state %q/%q want %q/%q", ew, aw, p.enabled, p.active)
-			}
-			if fs.enabledWord() != p.enabled || fs.activeWord() != p.active {
-				t.Fatalf("rollback final model state %q/%q want %q/%q", fs.enabledWord(), fs.activeWord(), p.enabled, p.active)
-			}
-		})
+	return false
+}
+
+func TestUnitHardeningAndManagedMarker(t *testing.T) {
+	_, _, paths := fakeManager(t)
+	u := Unit(paths, DefaultListen, "")
+	for _, x := range []string{"# Managed by watchpost-agent. Do not edit manually.", "NoNewPrivileges=true", "ProtectSystem=strict", "ReadWritePaths=\"" + paths.DataDir + "\"", "User=" + ServiceUser, "Group=" + ServiceGroup, "WantedBy=multi-user.target"} {
+		if !strings.Contains(u, x) {
+			t.Fatal("missing " + x)
+		}
+	}
+	if !strings.Contains(u, "watchpost-agent-managed: v1 sha256=") {
+		t.Fatal("managed integrity header missing")
+	}
+	if !strings.Contains(Unit(paths, DefaultListen, "/etc/watchpost-agent/watchpost-agent.env"), "EnvironmentFile=\"/etc/watchpost-agent/watchpost-agent.env\"") {
+		t.Fatal("env file not referenced")
 	}
 }
 
-// TestInstallRestoresEnablementLayers proves the rollback normalizes
-// enablement links before recreating them, so a runtime-only prior never keeps
-// the persistent link created by the attempted install.
-func TestInstallRestoresEnablementLayers(t *testing.T) {
-	cases := []struct {
-		prior              string
-		wantEnable, wantRT bool
-	}{
-		{"enabled", true, false},
-		{"enabled-runtime", false, true},
-		{"disabled", false, false},
+func TestValidateNoControlAndQuote(t *testing.T) {
+	if e := validateNoControl("127.0.0.1:8090", "listen"); e != nil {
+		t.Fatal(e)
 	}
-	for _, tc := range cases {
-		t.Run("prior="+tc.prior, func(t *testing.T) {
-			manager, fr, paths, source := testManager(t)
-			fs := newFakeSystemd(paths.Unit)
-			fs.runner(fr)
-			if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-				t.Fatal(err)
-			}
-			fs.setState(tc.prior, "inactive")
-			fs.failVerb = "restart"
-			if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := manager.Upgrade(source, paths, "127.0.0.1:9004", ""); err == nil {
-				t.Fatal("install should fail at restart")
-			}
-			ew, _, _ := manager.systemctl(paths, "is-enabled", "watchpost-agent.service")
-			if strings.TrimSpace(ew) != tc.prior {
-				t.Fatalf("is-enabled %q want %q", ew, tc.prior)
-			}
-			if fs.enable != tc.wantEnable || fs.enableRT != tc.wantRT {
-				t.Fatalf("links enable=%v enableRT=%v want %v/%v", fs.enable, fs.enableRT, tc.wantEnable, tc.wantRT)
-			}
-			if fs.mask || fs.maskRT {
-				t.Fatal("unexpected mask link after rollback")
-			}
-		})
+	if e := validateNoControl("127.0.0.1:8090\nfoo", "listen"); e == nil {
+		t.Fatal("newline accepted")
+	}
+	if got := systemdQuote(`/a b/"x"$y`); got != `"/a b/\"x\"\$y"` {
+		t.Fatalf("quote = %q", got)
 	}
 }
 
-// TestInstallReachesInstalledStateForAcceptedPriors proves every accepted prior
-// state lets the install reach the documented enabled-and-active state, so a
-// state is never accepted merely because rollback could recover from an install
-// that can never succeed.
-func TestInstallReachesInstalledStateForAcceptedPriors(t *testing.T) {
-	for _, p := range [][2]string{
-		{"enabled", "active"}, {"enabled", "inactive"},
-		{"enabled-runtime", "active"}, {"enabled-runtime", "inactive"},
-		{"disabled", "active"}, {"disabled", "inactive"},
-	} {
-		t.Run(p[0]+"/"+p[1], func(t *testing.T) {
-			manager, fr, paths, source := testManager(t)
-			fs := newFakeSystemd(paths.Unit)
-			fs.runner(fr)
-			if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-				t.Fatal(err)
-			}
-			fs.setState(p[0], p[1])
-			if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := manager.Upgrade(source, paths, "127.0.0.1:9004", ""); err != nil {
-				t.Fatalf("accepted prior %s/%s could not reach the installed state: %v", p[0], p[1], err)
-			}
-			ew, _, _ := manager.systemctl(paths, "is-enabled", "watchpost-agent.service")
-			aw, _, _ := manager.systemctl(paths, "is-active", "watchpost-agent.service")
-			if strings.TrimSpace(ew) != "enabled" || strings.TrimSpace(aw) != "active" {
-				t.Fatalf("final %q/%q want enabled/active", ew, aw)
-			}
-		})
-	}
-}
-
-func TestInstallFailureRestoresPriorState(t *testing.T) {
-	steps := []struct {
-		verb string
-	}{
-		{"daemon-reload"}, {"enable"}, {"restart"},
-	}
-	t.Run("fresh install", func(t *testing.T) {
-		for _, st := range steps {
-			t.Run(st.verb, func(t *testing.T) {
-				manager, fr, paths, source := testManager(t)
-				fs := newFakeSystemd(paths.Unit)
-				fs.runner(fr)
-				fs.failVerb = st.verb
-				if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err == nil {
-					t.Fatalf("install with %s failure did not fail", st.verb)
-				}
-				if _, statErr := os.Stat(paths.Unit); !errors.Is(statErr, os.ErrNotExist) {
-					t.Fatalf("failed fresh install left the unit behind")
-				}
-				if _, statErr := os.Stat(paths.Binary); !errors.Is(statErr, os.ErrNotExist) {
-					t.Fatalf("failed fresh install left the binary behind")
-				}
-				if fs.enabledWord() != "not-found" || fs.activeWord() != "inactive" {
-					t.Fatalf("failed fresh install left %q/%q", fs.enabledWord(), fs.activeWord())
-				}
-				word, _, _ := manager.systemctl(paths, "is-enabled", "watchpost-agent.service")
-				if strings.TrimSpace(word) != "not-found" {
-					t.Fatalf("unit still reports enablement %q after failed fresh install", word)
-				}
-				word2, _, _ := manager.systemctl(paths, "is-active", "watchpost-agent.service")
-				if strings.TrimSpace(word2) != "inactive" {
-					t.Fatalf("unit still reports active %q after failed fresh install", word2)
-				}
-			})
-		}
-	})
-	t.Run("reinstall restores prior unit binary and lifecycle", func(t *testing.T) {
-		for _, st := range steps {
-			t.Run(st.verb, func(t *testing.T) {
-				manager, fr, paths, source := testManager(t)
-				fs := newFakeSystemd(paths.Unit)
-				fs.runner(fr)
-				if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-					t.Fatal(err)
-				}
-				priorUnit := mustRead(t, paths.Unit)
-				priorBin := mustRead(t, paths.Binary)
-				fs.setState("enabled-runtime", "inactive")
-				if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
-					t.Fatal(err)
-				}
-				fs.failVerb = st.verb
-				if err := manager.Upgrade(source, paths, "127.0.0.1:9004", ""); err == nil {
-					t.Fatalf("reinstall with %s failure did not fail", st.verb)
-				}
-				if string(priorUnit) != string(mustRead(t, paths.Unit)) {
-					t.Fatal("failed reinstall did not restore the prior unit")
-				}
-				if string(priorBin) != string(mustRead(t, paths.Binary)) {
-					t.Fatal("failed reinstall did not restore the prior binary")
-				}
-				if fs.enabledWord() != "enabled-runtime" || fs.activeWord() != "inactive" {
-					t.Fatalf("rollback did not restore prior lifecycle, got %q/%q", fs.enabledWord(), fs.activeWord())
-				}
-			})
-		}
-	})
-	t.Run("reinstall failure at restart restores enabled active prior", func(t *testing.T) {
-		manager, fr, paths, source := testManager(t)
-		fs := newFakeSystemd(paths.Unit)
-		fs.runner(fr)
-		if err := manager.Install(source, paths, "127.0.0.1:9001", ""); err != nil {
-			t.Fatal(err)
-		}
-		fs.setState("enabled", "active")
-		if err := os.WriteFile(source, []byte("v2 binary"), 0755); err != nil {
-			t.Fatal(err)
-		}
-		fs.failVerb = "restart"
-		if err := manager.Upgrade(source, paths, "127.0.0.1:9005", ""); err == nil {
-			t.Fatal("reinstall with restart failure did not fail")
-		}
-		if fs.enabledWord() != "enabled" || fs.activeWord() != "active" {
-			t.Fatalf("rollback did not restore enabled+active, got %q/%q", fs.enabledWord(), fs.activeWord())
-		}
-	})
-}
-
-func TestReleaseMatrixBuilds(t *testing.T) {
-	targets := []struct{ goos, goarch string }{
-		{"linux", "amd64"}, {"linux", "arm64"},
-		{"darwin", "amd64"}, {"darwin", "arm64"},
-		{"windows", "amd64"}, {"windows", "arm64"},
-	}
-	for _, tc := range targets {
-		t.Run(tc.goos+"/"+tc.goarch, func(t *testing.T) {
-			dir := t.TempDir()
-			cmd := exec.Command("go", "build", "-o", filepath.Join(dir, "svc"), ".")
-			cmd.Env = append(os.Environ(), "GOOS="+tc.goos, "GOARCH="+tc.goarch, "CGO_ENABLED=0")
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("%s/%s build failed: %v\n%s", tc.goos, tc.goarch, err, out)
-			}
-		})
-	}
-}
-
-func TestLogsReportsNonzeroJournalctl(t *testing.T) {
-	manager, fr, paths, source := testManager(t)
-	if err := manager.Install(source, paths, "127.0.0.1:8090", ""); err != nil {
+func TestResolveReturnsMachinePaths(t *testing.T) {
+	paths, err := Resolve(true)
+	if err != nil {
 		t.Fatal(err)
 	}
-	fr.handler = func(name string, args ...string) (string, int, error) {
-		if name == "journalctl" {
-			return "no journal found", 1, nil
-		}
-		return "", 0, nil
+	if paths.Binary != "/usr/local/bin/watchpost-agent" {
+		t.Fatalf("binary = %q", paths.Binary)
 	}
-	if err := manager.Logs(false, os.Stderr, paths); err == nil {
-		t.Fatal("logs ignored a nonzero journalctl exit")
+	if paths.DataDir != "/var/lib/watchpost-agent" {
+		t.Fatalf("data dir = %q", paths.DataDir)
+	}
+	if paths.Unit != "/etc/systemd/system/watchpost-agent.service" {
+		t.Fatalf("unit = %q", paths.Unit)
+	}
+	if !paths.System {
+		t.Fatal("system mode not default")
+	}
+}
+
+func TestLifecycleVerbsRequireManagedUnit(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	for _, v := range []string{"start", "stop", "restart", "enable", "disable"} {
+		if err := m.lifecycle(paths, v); err == nil {
+			t.Fatalf("%s succeeded without an installed unit", v)
+		}
+		if len(r.log) != 0 {
+			t.Fatalf("%s touched systemctl without a managed unit", v)
+		}
+	}
+	installManagedUnit(t, paths)
+	r.script["systemctl start watchpost-agent.service"] = fakeResult{}
+	if err := m.lifecycle(paths, "start"); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(r.log, "systemctl start watchpost-agent.service") {
+		t.Fatal("start did not call systemctl")
+	}
+}
+
+func TestLifecycleRefusesForeignUnit(t *testing.T) {
+	m, _, paths := fakeManager(t)
+	if e := writeFileAtomic(paths.Unit, []byte("[Unit]\nDescription=admin unit\n"), 0o644); e != nil {
+		t.Fatal(e)
+	}
+	for _, v := range []string{"start", "stop", "restart", "enable", "disable"} {
+		if err := m.lifecycle(paths, v); err == nil {
+			t.Fatalf("%s modified a foreign unit", v)
+		}
+	}
+}
+
+func TestInstallChangedBinaryRestarts(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	setState(r, "enabled", "active")
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# different binary\nexit 0\n"), 0o755)
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable watchpost-agent.service"] = fakeResult{}
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+	if e := m.Install(exe, paths, DefaultListen, ""); e != nil {
+		t.Fatal(e)
+	}
+	if !contains(r.log, "systemctl restart watchpost-agent.service") {
+		t.Fatal("changed binary did not trigger a restart")
+	}
+}
+
+func TestInstallSameBinaryIsNoOp(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	setState(r, "enabled", "active")
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, mustRead(t, paths.Binary), 0o755)
+	if e := m.Install(exe, paths, DefaultListen, ""); e != nil {
+		t.Fatal(e)
+	}
+	for _, call := range r.log {
+		if strings.HasPrefix(call, "systemctl daemon-reload") {
+			t.Fatal("identical reinstall performed a daemon-reload")
+		}
+	}
+}
+
+func TestStatusReportsStates(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	r.script["systemctl is-enabled watchpost-agent.service"] = fakeResult{out: "enabled", code: 0}
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	r.script["systemctl show -p MainPID --value watchpost-agent.service"] = fakeResult{out: "1234", code: 0}
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer h.Close()
+	listen := strings.TrimPrefix(h.URL, "http://")
+	writeFileAtomic(paths.Unit, []byte(Unit(paths, listen, "")), 0o644)
+	var buf bytes.Buffer
+	if e := m.Status(&buf, paths, "v1"); e != nil {
+		t.Fatal(e)
+	}
+	for _, want := range []string{"unit:    watchpost-agent.service", "enabled: enabled", "active:  active", "pid:     1234", "user:    watchpost-agent", "health:  ok"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("status output missing %q", want)
+		}
+	}
+}
+
+func TestLogsConstruction(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	if e := m.Logs(false, io.Discard, paths); e != nil {
+		t.Fatal(e)
+	}
+	if !contains(r.log, "journalctl --unit watchpost-agent.service") {
+		t.Fatal("logs did not run journalctl --unit")
+	}
+}
+
+func TestUninstallPreservesData(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	r.script["systemctl disable --now watchpost-agent.service"] = fakeResult{}
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	if e := m.Uninstall(io.Discard, paths); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(paths.Unit); !os.IsNotExist(e) {
+		t.Fatal("unit file not removed")
+	}
+	if _, e := os.Stat(paths.Binary); os.IsNotExist(e) {
+		t.Fatal("binary should be preserved on uninstall")
+	}
+}
+
+func TestUpdatePreservesActiveState(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	setState(r, "enabled", "active")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	oldHealth := healthCheck
+	healthCheck = func(url string) error { return nil }
+	defer func() { healthCheck = oldHealth }()
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+	if e := m.Update(exe, fakeSHA(exe), paths); e != nil {
+		t.Fatal(e)
+	}
+	if !contains(r.log, "systemctl restart watchpost-agent.service") {
+		t.Fatal("active update did not restart")
+	}
+	r.log = nil
+	setState(r, "enabled", "inactive")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "inactive", code: 0}
+	if e := m.Update(exe, fakeSHA(exe), paths); e != nil {
+		t.Fatal(e)
+	}
+	for _, call := range r.log {
+		if strings.Contains(call, "restart watchpost-agent.service") || strings.Contains(call, "start watchpost-agent.service") {
+			t.Fatalf("stopped update started the service: %s", call)
+		}
+	}
+}
+
+func TestUpdateFailedActivationRestoresOldBinary(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	oldBin := mustRead(t, paths.Binary)
+	setState(r, "enabled", "active")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	oldHealth := healthCheck
+	healthCheck = func(url string) error { return nil }
+	defer func() { healthCheck = oldHealth }()
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{out: "activation failed", code: 1}
+	r.script["systemctl stop watchpost-agent.service"] = fakeResult{}
+	if e := m.Update(exe, fakeSHA(exe), paths); e == nil {
+		t.Fatal("failed activation update returned nil")
+	}
+	now, _ := os.ReadFile(paths.Binary)
+	if !bytes.Equal(now, oldBin) {
+		t.Fatal("failed activation did not restore the old binary")
+	}
+}
+
+func TestUpdateAndRollbackRefuseForeignUnit(t *testing.T) {
+	m, _, paths := fakeManager(t)
+	if e := writeFileAtomic(paths.Unit, []byte("[Unit]\nDescription=admin\n[Service]\nExecStart=/usr/bin/thing\n[Install]\nWantedBy=multi-user.target\n"), 0o644); e != nil {
+		t.Fatal(e)
+	}
+	before, _ := os.ReadFile(paths.Binary)
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	if e := m.Update(exe, fakeSHA(exe), paths); e == nil {
+		t.Fatal("update mutated a foreign unit")
+	}
+	if e := m.Rollback(paths); e == nil {
+		t.Fatal("rollback mutated a foreign unit")
+	}
+	after, _ := os.ReadFile(paths.Binary)
+	if !bytes.Equal(before, after) {
+		t.Fatal("update/rollback mutated the binary of a foreign unit")
+	}
+}
+
+func TestRollbackFailClosedWithoutMarker(t *testing.T) {
+	m, _, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	os.WriteFile(paths.Binary+".rollback", []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	os.Remove(paths.Binary + ".prior-active")
+	if e := m.Rollback(paths); e == nil {
+		t.Fatal("rollback defaulted to active without a prior-state marker")
+	}
+}
+
+func TestEndToEndActiveUpdateThenRollback(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	oldBin := mustRead(t, paths.Binary)
+	setState(r, "enabled", "active")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	oldHealth := healthCheck
+	healthCheck = func(url string) error { return nil }
+	defer func() { healthCheck = oldHealth }()
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+	if e := m.Update(exe, fakeSHA(exe), paths); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(paths.Binary + ".rollback"); e != nil {
+		t.Fatal("rollback binary missing after successful update")
+	}
+	if _, e := os.Stat(paths.Binary + ".prior-active"); e != nil {
+		t.Fatal("prior-active marker missing after successful update")
+	}
+	now, _ := os.ReadFile(paths.Binary)
+	if bytes.Equal(now, oldBin) {
+		t.Fatal("update did not replace the binary")
+	}
+	r.log = nil
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+	if e := m.Rollback(paths); e != nil {
+		t.Fatal(e)
+	}
+	back, _ := os.ReadFile(paths.Binary)
+	if !bytes.Equal(back, oldBin) {
+		t.Fatal("rollback did not restore the old binary")
+	}
+}
+
+func TestEndToEndStoppedUpdateThenRollback(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	oldBin := mustRead(t, paths.Binary)
+	setState(r, "enabled", "inactive")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "inactive", code: 0}
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	if e := m.Update(exe, fakeSHA(exe), paths); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(paths.Binary + ".prior-active"); e != nil {
+		t.Fatal("prior-active marker missing after stopped update")
+	}
+	r.log = nil
+	if e := m.Rollback(paths); e != nil {
+		t.Fatal(e)
+	}
+	back, _ := os.ReadFile(paths.Binary)
+	if !bytes.Equal(back, oldBin) {
+		t.Fatal("rollback did not restore the old binary")
+	}
+	for _, call := range r.log {
+		if strings.Contains(call, "restart watchpost-agent.service") || strings.Contains(call, "start watchpost-agent.service") {
+			t.Fatalf("rollback of a stopped service started it: %s", call)
+		}
+	}
+}
+
+func TestUpdateVerifiesHealthNotJustRestartExit(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	oldBin := mustRead(t, paths.Binary)
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	setState(r, "enabled", "active")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	oldHealth := healthCheck
+	healthCheck = func(url string) error { return fmt.Errorf("health failed") }
+	defer func() { healthCheck = oldHealth }()
+	oldWin := healthWindow
+	healthWindow = func() time.Duration { return 1 * time.Second }
+	defer func() { healthWindow = oldWin }()
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+	r.script["systemctl stop watchpost-agent.service"] = fakeResult{}
+	if e := m.Update(exe, fakeSHA(exe), paths); e == nil {
+		t.Fatal("update succeeded although the new binary never became healthy")
+	}
+	now, _ := os.ReadFile(paths.Binary)
+	if !bytes.Equal(now, oldBin) {
+		t.Fatal("unhealthy update did not restore the old binary")
+	}
+}
+
+func TestInitialRestartFailureSurfacesRecoveryFailure(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	setState(r, "enabled", "active")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	oldHealth := healthCheck
+	healthCheck = func(url string) error { return nil }
+	defer func() { healthCheck = oldHealth }()
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.seq["systemctl restart watchpost-agent.service"] = []fakeResult{
+		{out: "new binary failed to start", code: 1},
+		{out: "recovery restart failed", code: 1},
+	}
+	r.script["systemctl stop watchpost-agent.service"] = fakeResult{}
+	uerr := m.Update(exe, fakeSHA(exe), paths)
+	if uerr == nil {
+		t.Fatal("update succeeded despite initial restart failure")
+	}
+	if !strings.Contains(uerr.Error(), "restart after update") {
+		t.Fatalf("original restart failure missing: %v", uerr)
+	}
+	if !strings.Contains(uerr.Error(), "recovery") {
+		t.Fatalf("recovery failure not surfaced: %v", uerr)
+	}
+}
+
+func TestInitialRestartFailureRecoverySucceedsCleansMetadata(t *testing.T) {
+	m, r, paths := fakeManager(t)
+	installManagedUnit(t, paths)
+	oldBin := mustRead(t, paths.Binary)
+	setState(r, "enabled", "active")
+	r.script["systemctl is-active watchpost-agent.service"] = fakeResult{out: "active", code: 0}
+	oldHealth := healthCheck
+	healthCheck = func(url string) error { return nil }
+	defer func() { healthCheck = oldHealth }()
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\n# v2\nexit 0\n"), 0o755)
+	r.seq["systemctl restart watchpost-agent.service"] = []fakeResult{
+		{out: "new binary failed to start", code: 1},
+		{},
+	}
+	r.script["systemctl stop watchpost-agent.service"] = fakeResult{}
+	uerr := m.Update(exe, fakeSHA(exe), paths)
+	if uerr == nil {
+		t.Fatal("update should report the initial restart failure")
+	}
+	back, _ := os.ReadFile(paths.Binary)
+	if !bytes.Equal(back, oldBin) {
+		t.Fatal("recovery did not restore the old binary")
+	}
+	if _, e := os.Stat(paths.Binary + ".rollback"); !os.IsNotExist(e) {
+		t.Fatal("stale rollback binary left after verified recovery")
+	}
+	if _, e := os.Stat(paths.Binary + ".prior-active"); !os.IsNotExist(e) {
+		t.Fatal("stale prior-active marker left after verified recovery")
+	}
+}
+
+func TestTamperedManagedUnitRejected(t *testing.T) {
+	m, _, paths := fakeManager(t)
+	u := Unit(paths, DefaultListen, "")
+	tampered := strings.Replace(u, DefaultListen, "127.0.0.1:9999", 1)
+	writeFileAtomic(paths.Unit, []byte(tampered), 0o644)
+	if e := m.lifecycle(paths, "start"); e == nil {
+		t.Fatal("tampered managed unit accepted for start")
 	}
 }

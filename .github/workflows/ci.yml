@@ -1,0 +1,104 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.25.x'}
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go build ./cmd/watchpost-agent
+      - run: sh -n install.sh packaging/build-release.sh
+  build:
+    strategy:
+      matrix:
+        include:
+          - {os: linux, arch: amd64}
+          - {os: linux, arch: arm64}
+          - {os: windows, arch: amd64}
+          - {os: windows, arch: arm64}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.25.x'}
+      - run: GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} CGO_ENABLED=0 go build -trimpath -o watchpost-agent-${{ matrix.os }}-${{ matrix.arch }} ./cmd/watchpost-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: watchpost-agent-${{ matrix.os }}-${{ matrix.arch }}
+          path: watchpost-agent-*
+  systemd-lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.25.x'}
+      - name: Build the binary under test
+        run: CGO_ENABLED=0 go build -o /tmp/wpa ./cmd/watchpost-agent
+      - name: Rehearse the systemd lifecycle (install -> healthz -> update -> rollback -> uninstall)
+        run: |
+          set -euxo pipefail
+          DATA=/var/lib/watchpost-agent
+          wait_healthz() {
+            for _ in $(seq 1 40); do
+              if curl -fsS http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 0.5
+            done
+            echo "healthz never became ready" >&2
+            return 1
+          }
+          sudo /tmp/wpa service install
+          # account and data ownership are created by install
+          id watchpost-agent
+          sudo test -O "$DATA" -o "$(stat -c %U "$DATA")" = watchpost-agent || exit 1
+          systemctl is-active watchpost-agent.service
+          wait_healthz
+          # install is idempotent (byte-identical + enabled + active -> no-op)
+          sudo /tmp/wpa service install
+          wait_healthz
+          # status is read-only, no sudo
+          /tmp/wpa service status | grep -E 'health:  ok'
+          # start/stop/restart/enable/disable family
+          sudo /tmp/wpa service stop
+          sudo /tmp/wpa service stop   # repeated stop is safe
+          sudo /tmp/wpa service start
+          wait_healthz
+          sudo /tmp/wpa service restart
+          wait_healthz
+          sudo /tmp/wpa service disable
+          sudo /tmp/wpa service disable   # repeated disable is safe
+          test "$(systemctl is-enabled watchpost-agent.service)" = disabled
+          sudo /tmp/wpa service enable
+          test "$(systemctl is-enabled watchpost-agent.service)" = enabled
+          # boot-enablement is asserted structurally (not a reboot claim)
+          grep -q 'WantedBy=multi-user.target' /etc/systemd/system/watchpost-agent.service
+          # update with a verified artifact
+          CGO_ENABLED=0 go build -o /tmp/wpa2 ./cmd/watchpost-agent
+          SHA=$(sha256sum /tmp/wpa2 | cut -d' ' -f1)
+          sudo /tmp/wpa service update /tmp/wpa2 "$SHA"
+          wait_healthz
+          # rollback restores the previous executable
+          sudo /tmp/wpa service rollback
+          wait_healthz
+          # a deliberately stopped service stays stopped across update and rollback
+          sudo /tmp/wpa service stop
+          CGO_ENABLED=0 go build -o /tmp/wpa4 ./cmd/watchpost-agent
+          SHA4=$(sha256sum /tmp/wpa4 | cut -d' ' -f1)
+          sudo /tmp/wpa service update /tmp/wpa4 "$SHA4"
+          test "$(systemctl is-active watchpost-agent.service)" = inactive
+          sudo /tmp/wpa service rollback
+          test "$(systemctl is-active watchpost-agent.service)" = inactive
+          # stop -> uninstall removes the unit; data is preserved
+          sudo /tmp/wpa service stop
+          sudo /tmp/wpa service uninstall
+          test ! -f /etc/systemd/system/watchpost-agent.service
+          sudo test -d "$DATA"

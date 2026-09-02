@@ -14,10 +14,9 @@ import (
 )
 
 func TestUnitMatchesForegroundConfig(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	paths := service.Paths{Binary: "/usr/local/lib/watchpost-agent/watchpost-agent", DataDir: defaultDataDir()}
+	paths := service.Paths{Binary: "/usr/local/bin/watchpost-agent", DataDir: "/var/lib/watchpost-agent", System: true}
 	unit := service.Unit(paths, "127.0.0.1:8090", "")
-	for _, want := range []string{`"--listen" "127.0.0.1:8090"`, `"--data-dir" "` + paths.DataDir + `"`} {
+	for _, want := range []string{`"--listen" "127.0.0.1:8090"`, `"--data-dir" "` + paths.DataDir + `"`, "WantedBy=multi-user.target"} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit does not match foreground defaults (%s):\n%s", want, unit)
 		}
@@ -43,16 +42,25 @@ func TestGoDirectiveAllowsToolchainSelection(t *testing.T) {
 }
 
 func TestServiceNamespaceDispatch(t *testing.T) {
-	// `watchpost-agent service status` and `watchpost-agent status` both resolve
-	// to the service command and report a missing unit without touching systemd.
-	t.Setenv("HOME", t.TempDir())
-	for _, args := range [][]string{{"service", "status"}, {"status"}} {
-		err := run(args)
-		if err == nil {
-			t.Fatalf("%v unexpectedly succeeded", args)
+	// `watchpost-agent service status` reports a missing unit without touching
+	// systemd (exit code 1, diagnostic on stderr). The top-level status alias is
+	// removed in the clean machine-service break; only the service namespace is
+	// canonical.
+	for _, args := range [][]string{{"status"}, {"service", "status"}} {
+		var code int
+		if args[0] == "service" {
+			code = runServiceCommand(args[1:])
+		} else {
+			// `watchpost-agent status` is not a service alias; it is treated as
+			// an unexpected argument and exits with a usage error (exit 1 path).
+			err := run(args)
+			if err == nil {
+				t.Fatalf("%v unexpectedly succeeded", args)
+			}
+			continue
 		}
-		if !strings.Contains(err.Error(), "not installed") {
-			t.Fatalf("%v error: %v", args, err)
+		if code == 0 {
+			t.Fatalf("%v unexpectedly succeeded (exit 0)", args)
 		}
 	}
 }

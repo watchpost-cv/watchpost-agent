@@ -1,8 +1,12 @@
+// Package service implements the machine-service lifecycle for the Watchpost
+// Agent: a systemd system unit backed by a dedicated unprivileged account, a
+// canonical /var/lib/watchpost-agent data directory and root-protected
+// /etc/watchpost-agent configuration. The CLI surface, exit-code model and
+// transaction semantics mirror the canonical Web Fleet reference so the whole
+// ecosystem behaves predictably.
 package service
 
 import (
-	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,9 +16,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,13 +28,11 @@ import (
 // unitMarker marks unit files written by `watchpost-agent service`.
 const unitMarker = "# Managed by watchpost-agent. Do not edit manually."
 
-// managedPrefix introduces the versioned integrity header. The header is
-// followed by a SHA-256 of everything below it (managed metadata plus the unit
-// body), so any hand edit is detected on the next write, action or uninstall.
+// managedPrefix introduces the versioned integrity header followed by a SHA-256
+// of everything below it, so any hand edit is detected.
 const managedPrefix = "# watchpost-agent-managed: "
 
-// healthPath is the public, read-only liveness endpoint the service health
-// check targets.
+// healthPath is the public, read-only liveness endpoint.
 const healthPath = "/healthz"
 
 var (
@@ -37,7 +41,7 @@ var (
 	errModified   = errors.New("managed unit body no longer matches its recorded checksum")
 )
 
-// Paths holds the resolved installation paths for a user or system unit.
+// Paths holds the resolved installation paths for the machine service.
 type Paths struct {
 	Binary  string
 	DataDir string
@@ -45,26 +49,25 @@ type Paths struct {
 	System  bool
 }
 
-// Resolve returns the stable paths for the agent in user mode. System-wide
-// mode is intentionally not supported yet: the previous implementation ran the
-// agent web service as root, which is not an acceptable default. A dedicated
-// unprivileged account design is a documented follow-up.
+// DefaultPaths returns the canonical machine-service paths.
+func DefaultPaths() Paths {
+	return Paths{
+		Binary:  "/usr/local/bin/watchpost-agent",
+		DataDir: "/var/lib/watchpost-agent",
+		Unit:    "/etc/systemd/system/watchpost-agent.service",
+		System:  true,
+	}
+}
+
+// Resolve returns the canonical machine-service paths. System-wide mode is the
+// default and the only supported mode: the agent is a machine service running
+// under a dedicated unprivileged account. The system flag is accepted for
+// compatibility with callers that pass it explicitly.
 func Resolve(system bool) (Paths, error) {
 	if runtime.GOOS != "linux" {
 		return Paths{}, errors.New("service installation currently requires Linux systemd")
 	}
-	if system {
-		return Paths{}, errors.New("--system is not supported yet: it previously ran the agent web service as root; a dedicated unprivileged service account is a documented follow-up")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Paths{}, err
-	}
-	return Paths{
-		Binary:  filepath.Join(home, ".local", "lib", "watchpost-agent", "watchpost-agent"),
-		DataDir: filepath.Join(home, ".local", "share", "watchpost-agent"),
-		Unit:    filepath.Join(home, ".config", "systemd", "user", "watchpost-agent.service"),
-	}, nil
+	return DefaultPaths(), nil
 }
 
 // Runner runs a command and returns its combined output, exit code (0 on
@@ -111,68 +114,6 @@ func New() Manager {
 	}
 }
 
-// svcState is a deliberately resolved systemd state category that separates
-// command-result validation from the lifecycle meaning uninstall needs.
-type svcState string
-
-const (
-	stateActive     svcState = "active"
-	stateReloading  svcState = "reloading"
-	stateRefreshing svcState = "refreshing"
-	stateTransition svcState = "transitioning"
-	stateInactive   svcState = "inactive"
-	stateUnknown    svcState = "unknown"
-	stateEnabled    svcState = "enabled"
-	stateNotEnabled svcState = "not-enabled"
-	stateMasked     svcState = "masked"
-)
-
-func stateName(s svcState) string { return string(s) }
-
-type exitExpect int
-
-const (
-	exitZero exitExpect = iota
-	exitNonzero
-	exitEither
-)
-
-func classifyActive(word string) (svcState, exitExpect, bool) {
-	switch word {
-	case "active":
-		return stateActive, exitZero, true
-	case "reloading":
-		return stateReloading, exitZero, true
-	case "refreshing":
-		return stateRefreshing, exitEither, true
-	case "inactive", "dead", "failed":
-		return stateInactive, exitNonzero, true
-	case "activating", "deactivating", "maintenance":
-		return stateTransition, exitNonzero, true
-	case "not-found", "unknown":
-		return stateUnknown, exitNonzero, true
-	}
-	return "", 0, false
-}
-
-func classifyEnabled(word string) (svcState, exitExpect, bool) {
-	switch word {
-	case "enabled", "enabled-runtime":
-		return stateEnabled, exitZero, true
-	case "static", "alias", "indirect", "generated":
-		return stateNotEnabled, exitZero, true
-	case "disabled", "linked", "linked-runtime", "transient":
-		return stateNotEnabled, exitNonzero, true
-	case "masked", "masked-runtime":
-		return stateMasked, exitNonzero, true
-	case "not-found":
-		return stateNotEnabled, exitNonzero, true
-	case "unknown":
-		return stateUnknown, exitNonzero, true
-	}
-	return "", 0, false
-}
-
 func bounded(s string) string {
 	const max = 2000
 	if len(s) > max {
@@ -209,9 +150,6 @@ func systemdQuote(s string) string {
 }
 
 func (m Manager) systemctl(paths Paths, args ...string) (string, int, error) {
-	if !paths.System {
-		args = append([]string{"--user"}, args...)
-	}
 	return m.Run("systemctl", args...)
 }
 
@@ -226,52 +164,100 @@ func (m Manager) systemctlSuccess(paths Paths, args ...string) error {
 	return nil
 }
 
-func (m Manager) queryState(paths Paths, verb string) (svcState, error) {
-	out, code, err := m.systemctl(paths, verb, "watchpost-agent.service")
+// unitStateWord runs a state verb (is-enabled/is-active), tolerating a nonzero
+// exit for legitimate negative answers and returning the trimmed word.
+func (m Manager) unitStateWord(paths Paths, verb string) (string, error) {
+	out, _, err := m.systemctl(paths, verb, "watchpost-agent.service")
 	if err != nil {
 		return "", fmt.Errorf("cannot run systemctl %s: %w", verb, err)
 	}
-	word := strings.TrimSpace(out)
-	var st svcState
-	var expect exitExpect
-	var ok bool
-	switch verb {
-	case "is-active":
-		st, expect, ok = classifyActive(word)
-	case "is-enabled":
-		st, expect, ok = classifyEnabled(word)
-	}
-	if !ok {
-		return "", fmt.Errorf("systemctl %s returned unrecognized state %q (exit %d)", verb, word, code)
-	}
-	switch expect {
-	case exitZero:
-		if code != 0 {
-			return "", fmt.Errorf("systemctl %s reported %q but exited %d; inconsistent state result", verb, word, code)
-		}
-	case exitNonzero:
-		if code == 0 {
-			return "", fmt.Errorf("systemctl %s reported %q but exited 0; inconsistent state result", verb, word)
-		}
-	}
-	return st, nil
+	return strings.TrimSpace(out), nil
 }
 
-func (m Manager) requireManaged(paths Paths, verb string) error {
-	if _, err := readManagedUnit(paths.Unit); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("refusing to %s the service: unit is not installed", verb)
-		}
-		return fmt.Errorf("refusing to %s the service: %w", verb, err)
+// validateEnvFile validates an EnvironmentFile path for the service unit:
+// absolute, a regular non-symlink file with exactly owner-only 0600
+// permissions. Secret values are never read or embedded.
+func validateEnvFile(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("environment file %q must be an absolute path", path)
+	}
+	if err := validateNoControl(path, "environment file"); err != nil {
+		return err
+	}
+	if strings.ContainsAny(path, "%") {
+		return fmt.Errorf("environment file %q must not contain systemd specifiers (%% )", path)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("environment file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("environment file %q must not be a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("environment file %q must be a regular file", path)
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("environment file %q must have exactly 0600 permissions (owner read/write only)", path)
 	}
 	return nil
 }
 
-func renderUnitBody(paths Paths, listen, envfile string) string {
-	wanted := "default.target"
-	if paths.System {
-		wanted = "multi-user.target"
+// prepareDataDir creates the service data directory with owner-only permissions
+// and refuses symlinks, non-directories, unsafe permissions or wrong ownership.
+func prepareDataDir(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return fmt.Errorf("cannot create data directory %q: %w", path, err)
 	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("data directory %q: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("data directory %q must not be a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("data directory %q is not a directory", path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("data directory %q must not be group- or world-writable", path)
+	}
+	return nil
+}
+
+// validateReadWritePath validates a data directory for ReadWritePaths=.
+func validateReadWritePath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("data directory %q must be an absolute path", path)
+	}
+	if err := validateNoControl(path, "data directory"); err != nil {
+		return err
+	}
+	if strings.ContainsAny(path, "%") {
+		return fmt.Errorf("data directory %q must not contain systemd specifiers (%% )", path)
+	}
+	if strings.ContainsAny(path, `"\`) {
+		return fmt.Errorf("data directory %q cannot be safely quoted in ReadWritePaths", path)
+	}
+	if len(path) > 0 && strings.ContainsRune("-+!~", rune(path[0])) {
+		return fmt.Errorf("data directory %q starts with a ReadWritePaths special prefix; use a plain absolute path", path)
+	}
+	return nil
+}
+
+// ServiceAccount are the dedicated unprivileged account constants.
+const ServiceUser = "watchpost-agent"
+const ServiceGroup = "watchpost-agent"
+
+// DefaultListen is the canonical loopback listen address embedded in the unit.
+const DefaultListen = "127.0.0.1:8090"
+
+// DefaultEnvFile is the root-protected environment file for protected
+// WATCHPOST_AGENT_* configuration.
+const DefaultEnvFile = "/etc/watchpost-agent/watchpost-agent.env"
+
+// renderUnitBody renders the systemd directives (no managed header).
+func renderUnitBody(paths Paths, listen, envfile string) string {
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
 	b.WriteString("Description=Watchpost Agent\n")
@@ -279,6 +265,8 @@ func renderUnitBody(paths Paths, listen, envfile string) string {
 	b.WriteString("Wants=network-online.target\n\n")
 	b.WriteString("[Service]\n")
 	b.WriteString("Type=simple\n")
+	b.WriteString("User=" + ServiceUser + "\n")
+	b.WriteString("Group=" + ServiceGroup + "\n")
 	b.WriteString("ExecStart=" + systemdQuote(paths.Binary))
 	b.WriteString(" " + systemdQuote("--listen") + " " + systemdQuote(listen))
 	b.WriteString(" " + systemdQuote("--data-dir") + " " + systemdQuote(paths.DataDir))
@@ -289,14 +277,14 @@ func renderUnitBody(paths Paths, listen, envfile string) string {
 	b.WriteString("NoNewPrivileges=true\n")
 	b.WriteString("PrivateTmp=true\n")
 	b.WriteString("ProtectSystem=strict\n")
-	b.WriteString("ProtectHome=read-only\n")
+	b.WriteString("ProtectHome=true\n")
 	b.WriteString("ReadWritePaths=" + systemdQuote(paths.DataDir) + "\n")
 	b.WriteString("Environment=HOME=%h\n")
 	if envfile != "" {
 		b.WriteString("EnvironmentFile=" + systemdQuote(envfile) + "\n")
 	}
 	b.WriteString("\n[Install]\n")
-	b.WriteString("WantedBy=" + wanted + "\n")
+	b.WriteString("WantedBy=multi-user.target\n")
 	return b.String()
 }
 
@@ -331,7 +319,7 @@ type Meta struct {
 // ok=false when no unit is installed. A foreign or modified unit is an error so
 // install/upgrade never silently diverge from it.
 func (m Manager) ExistingMeta(paths Paths) (Meta, bool, error) {
-	meta, err := readManagedUnit(paths.Unit)
+	meta, err := readManagedUnitFile(paths.Unit)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Meta{}, false, nil
@@ -354,92 +342,17 @@ func PreserveInstallValues(existing Meta, listenSet bool, listen string, envfile
 	return listen, envfile
 }
 
-// validateEnvFile validates an EnvironmentFile path for the service unit:
-// absolute, a regular non-symlink file with exactly owner-only 0600
-// permissions, owned by the invoking user, and free of systemd specifier and
-// control characters. Secret values are never read or embedded.
-func validateEnvFile(path string) error {
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("environment file %q must be an absolute path", path)
-	}
-	if err := validateNoControl(path, "environment file"); err != nil {
-		return err
-	}
-	if strings.ContainsAny(path, "%") {
-		return fmt.Errorf("environment file %q must not contain systemd specifiers (%% )", path)
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("environment file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("environment file %q must not be a symlink", path)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("environment file %q must be a regular file", path)
-	}
-	if info.Mode().Perm() != 0o600 {
-		return fmt.Errorf("environment file %q must have exactly 0600 permissions (owner read/write only)", path)
-	}
-	if err := fileOwnerOK(info); err != nil {
-		return fmt.Errorf("environment file %q: %w", path, err)
-	}
-	return nil
-}
-
-// prepareDataDir creates the service data directory with owner-only permissions
-// and refuses symlinks, non-directories, unsafe permissions or wrong ownership.
-func prepareDataDir(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return fmt.Errorf("cannot create data directory %q: %w", path, err)
-	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("data directory %q: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("data directory %q must not be a symlink", path)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("data directory %q is not a directory", path)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("data directory %q must not be group- or world-writable", path)
-	}
-	if err := fileOwnerOK(info); err != nil {
-		return fmt.Errorf("data directory %q: %w", path, err)
-	}
-	return nil
-}
-
-// validateReadWritePath validates a data directory for the ReadWritePaths=
-// directive: absolute, free of control characters, systemd specifiers, quotes
-// and backslashes, and not starting with a special path-list prefix.
-func validateReadWritePath(path string) error {
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("data directory %q must be an absolute path", path)
-	}
-	if err := validateNoControl(path, "data directory"); err != nil {
-		return err
-	}
-	if strings.ContainsAny(path, "%") {
-		return fmt.Errorf("data directory %q must not contain systemd specifiers (%% )", path)
-	}
-	if strings.ContainsAny(path, `"\`) {
-		return fmt.Errorf("data directory %q cannot be safely quoted in ReadWritePaths", path)
-	}
-	if len(path) > 0 && strings.ContainsRune("-+!~", rune(path[0])) {
-		return fmt.Errorf("data directory %q starts with a ReadWritePaths special prefix; use a plain absolute path", path)
-	}
-	return nil
-}
-
-func readManagedUnit(path string) (unitMeta, error) {
+// readManagedUnitFile reads a unit file path and parses its managed content.
+func readManagedUnitFile(path string) (unitMeta, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return unitMeta{}, err
 	}
-	lines := strings.Split(string(data), "\n")
+	return readManagedUnit(string(data))
+}
+
+func readManagedUnit(content string) (unitMeta, error) {
+	lines := strings.Split(content, "\n")
 	if len(lines) < 3 || lines[0] != unitMarker {
 		return unitMeta{}, errNotManaged
 	}
@@ -456,8 +369,8 @@ func readManagedUnit(path string) (unitMeta, error) {
 	if sm == nil {
 		return unitMeta{}, errMalformed
 	}
-	content := strings.Join(lines[2:], "\n")
-	sum := sha256.Sum256([]byte(content))
+	body := strings.Join(lines[2:], "\n")
+	sum := sha256.Sum256([]byte(body))
 	if hex.EncodeToString(sum[:]) != sm[1] {
 		return unitMeta{}, errModified
 	}
@@ -508,9 +421,39 @@ func readManagedUnit(path string) (unitMeta, error) {
 	return meta, nil
 }
 
+// validateManagedUnit performs the structural ownership/integrity check: the
+// unit must carry the agent managed header AND the required directives, so a
+// stale or malformed managed unit is classified rather than treated healthy.
+func validateManagedUnit(body []byte) error {
+	if _, err := readManagedUnit(string(body)); err != nil {
+		return err
+	}
+	t := string(body)
+	for _, want := range []string{"[Unit]", "[Service]", "[Install]", "Description=Watchpost Agent", "ExecStart=", "User=" + ServiceUser, "WantedBy=multi-user.target"} {
+		if !strings.Contains(t, want) {
+			return fmt.Errorf("malformed managed unit: missing %q", want)
+		}
+	}
+	return nil
+}
+
+func (m Manager) requireManaged(paths Paths, verb string) error {
+	b, e := os.ReadFile(paths.Unit)
+	if errors.Is(e, os.ErrNotExist) {
+		return fmt.Errorf("refusing to %s the service: unit is not installed (run `watchpost-agent service install`)", verb)
+	}
+	if e != nil {
+		return fmt.Errorf("refusing to %s the service: %w", verb, e)
+	}
+	if ve := validateManagedUnit(b); ve != nil {
+		return fmt.Errorf("refusing to %s the service: %v", verb, ve)
+	}
+	return nil
+}
+
 func writeManagedUnit(path, content string) error {
 	if _, err := os.Stat(path); err == nil {
-		if _, err := readManagedUnit(path); err != nil {
+		if _, err := readManagedUnitFile(path); err != nil {
 			return fmt.Errorf("refusing to overwrite %s: %w", path, err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -549,54 +492,12 @@ func writeManagedUnit(path, content string) error {
 	return nil
 }
 
-func readFileIfPresent(path string) ([]byte, bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false
-	}
-	return data, true
-}
-
-// stageCopy copies source to a staging file beside destination (no publish),
-// so a copy failure can never corrupt the installed binary.
-func stageCopy(source, dest string, mode os.FileMode) (string, error) {
-	input, err := os.Open(source)
-	if err != nil {
-		return "", err
-	}
-	defer input.Close()
-	dir := filepath.Dir(dest)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	tmp, err := os.CreateTemp(dir, ".watchpost-agent-stage-*")
-	if err != nil {
-		return "", err
-	}
-	name := tmp.Name()
-	if _, err := io.Copy(tmp, input); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(name)
-		return "", err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(name)
-		return "", err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(name)
-		return "", err
-	}
-	return name, nil
-}
-
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".watchpost-agent-restore-*")
+	tmp, err := os.CreateTemp(dir, ".watchpost-agent-write-*")
 	if err != nil {
 		return err
 	}
@@ -616,259 +517,63 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(name, path)
 }
 
-// systemctlTolerantMissing runs a systemctl verb treating "unit not loaded /
-// not found" results as success, which is expected when rolling back a failed
-// fresh install whose unit has already been removed.
-func (m Manager) systemctlTolerantMissing(paths Paths, args ...string) error {
-	out, code, err := m.systemctl(paths, args...)
-	if err != nil {
-		low := strings.ToLower(err.Error())
-		if strings.Contains(low, "not loaded") || strings.Contains(low, "not found") || strings.Contains(low, "no such file") {
-			return nil
-		}
-		return err
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, e := os.Open(src)
+	if e != nil {
+		return e
 	}
-	if code != 0 {
-		low := strings.ToLower(out)
-		if strings.Contains(low, "not loaded") || strings.Contains(low, "not found") || strings.Contains(low, "no such file") {
-			return nil
+	defer in.Close()
+	tmp := dst + ".new"
+	out, e := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if e != nil {
+		return e
+	}
+	if _, e = io.Copy(out, in); e != nil {
+		out.Close()
+		return e
+	}
+	if e = out.Sync(); e != nil {
+		out.Close()
+		return e
+	}
+	if e = out.Close(); e != nil {
+		return e
+	}
+	return os.Rename(tmp, dst)
+}
+
+func fileSHA256(path string) (string, error) {
+	b, e := os.ReadFile(path)
+	if e != nil {
+		return "", e
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:]), nil
+}
+
+func ensureServiceAccount() error {
+	if out, e := exec.Command("groupadd", "--system", ServiceGroup).CombinedOutput(); e != nil {
+		if !strings.Contains(string(out), "exists") {
+			return fmt.Errorf("groupadd: %s", strings.TrimSpace(string(out)))
 		}
-		return fmt.Errorf("systemctl %s exited %d: %s", strings.Join(args, " "), code, bounded(strings.TrimSpace(out)))
+	}
+	if out, e := exec.Command("useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "--gid", ServiceGroup, ServiceUser).CombinedOutput(); e != nil {
+		if !strings.Contains(string(out), "exists") {
+			return fmt.Errorf("useradd: %s", strings.TrimSpace(string(out)))
+		}
 	}
 	return nil
 }
 
-// rawState returns the exact systemctl is-enabled/is-active output word. The
-// install transaction snapshots these raw words rather than the resolved
-// lifecycle categories so rollback can reproduce the precise prior state.
-func (m Manager) rawState(paths Paths, verb string) (string, error) {
-	out, _, err := m.systemctl(paths, verb, "watchpost-agent.service")
-	if err != nil {
-		return "", fmt.Errorf("cannot run systemctl %s: %w", verb, err)
-	}
-	word := strings.TrimSpace(out)
-	if word == "" {
-		return "", fmt.Errorf("systemctl %s returned no state", verb)
-	}
-	return word, nil
-}
+// ensureAccount is a test seam for service-account creation.
+var ensureAccount = func() error { return ensureServiceAccount() }
 
-// restorableEnabledWord reports whether a prior is-enabled raw word can be
-// restored exactly by the rollback sequence. Persistent/runtime enablement
-// links (enabled, enabled-runtime, masked, masked-runtime) and their absence
-// (disabled) are restorable; not-found is not (disabling a loaded unit yields
-// disabled, never not-found), and unit-file states that enable/disable cannot
-// reproduce (static, alias, indirect, generated, linked, linked-runtime,
-// transient, unknown) are not.
-func restorableEnabledWord(word string) bool {
-	switch word {
-	case "enabled", "enabled-runtime", "masked", "masked-runtime", "disabled":
-		return true
-	}
-	return false
-}
+// mkdirData and chownData are test seams for data-directory setup.
+var mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
+var chownData = func(path string) error { return chownAgent(path) }
 
-// restorableActiveWord reports whether a prior is-active raw word can be
-// restored exactly by the rollback sequence. Running and stopped are
-// restorable (restart/stop); dead, unknown and not-found are not, because stop
-// produces inactive rather than those words, and transient/failed states
-// cannot be reproduced deterministically.
-func restorableActiveWord(word string) bool {
-	switch word {
-	case "active", "inactive":
-		return true
-	}
-	return false
-}
-
-// restorablePriorState reports whether the enablement/active pair can be
-// reproduced exactly by the rollback ordering (enablement restored first, then
-// active state). A masked unit cannot be restarted, so masked + active is
-// refused before mutation.
-func restorablePriorState(enabledWord, activeWord string) bool {
-	if !restorableEnabledWord(enabledWord) || !restorableActiveWord(activeWord) {
-		return false
-	}
-	if (enabledWord == "masked" || enabledWord == "masked-runtime") && activeWord == "active" {
-		return false
-	}
-	return true
-}
-
-// enableRestoreSteps returns the systemctl calls that reproduce a prior
-// is-enabled word exactly. Enablement is normalized first: the persistent
-// enablement link created by the attempted install is removed with disable,
-// then the intended persistent or runtime link is recreated, so a runtime-only
-// prior never leaves a persistent enablement behind.
-func enableRestoreSteps(word, unit string) [][]string {
-	switch word {
-	case "enabled":
-		return [][]string{{"disable", unit}, {"enable", unit}}
-	case "enabled-runtime":
-		return [][]string{{"disable", unit}, {"enable", "--runtime", unit}}
-	default: // disabled
-		return [][]string{{"disable", unit}}
-	}
-}
-
-// activeRestoreArgs returns the systemctl call that reproduces a prior
-// is-active word exactly.
-func activeRestoreArgs(word, unit string) []string {
-	if word == "active" {
-		return []string{"restart", unit}
-	}
-	return []string{"stop", unit}
-}
-
-// rollbackInstall restores the pre-install state after a failed publish or
-// lifecycle step. For a reinstall it restores the prior unit and binary bytes,
-// reloads systemd, then reproduces the exact prior enablement and active
-// states. For a failed fresh install it stops and disables the newly installed
-// unit while it is still loaded, then removes the unit and binary and reloads
-// systemd, so no enablement link, active service or published binary is left
-// behind. It returns an explanatory string when rollback itself fails so
-// callers never claim a full rollback when only part of it succeeded.
-func (m Manager) rollbackInstall(paths Paths, oldUnit, oldBinary []byte, hadUnit, hadBinary bool, priorEnabledWord, priorActiveWord string) string {
-	var errs []string
-	if hadUnit {
-		if err := writeFileAtomic(paths.Unit, oldUnit, 0644); err != nil {
-			errs = append(errs, fmt.Sprintf("restore unit: %v", err))
-		}
-	} else {
-		if err := m.systemctlTolerantMissing(paths, "stop", "watchpost-agent.service"); err != nil {
-			errs = append(errs, fmt.Sprintf("stop new unit: %v", err))
-		}
-		if err := m.systemctlTolerantMissing(paths, "disable", "watchpost-agent.service"); err != nil {
-			errs = append(errs, fmt.Sprintf("disable new unit: %v", err))
-		}
-	}
-	if hadUnit {
-		if hadBinary {
-			if err := writeFileAtomic(paths.Binary, oldBinary, 0755); err != nil {
-				errs = append(errs, fmt.Sprintf("restore binary: %v", err))
-			}
-		}
-	} else {
-		if err := os.Remove(paths.Unit); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Sprintf("remove new unit: %v", err))
-		}
-		if err := os.Remove(paths.Binary); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Sprintf("remove new binary: %v", err))
-		}
-	}
-	if err := m.systemctlSuccess(paths, "daemon-reload"); err != nil {
-		errs = append(errs, fmt.Sprintf("reload systemd: %v", err))
-	}
-	if hadUnit {
-		for _, args := range enableRestoreSteps(priorEnabledWord, "watchpost-agent.service") {
-			if err := m.systemctlSuccess(paths, args...); err != nil {
-				errs = append(errs, fmt.Sprintf("restore enablement %q: %v", priorEnabledWord, err))
-				break
-			}
-		}
-		if err := m.systemctlSuccess(paths, activeRestoreArgs(priorActiveWord, "watchpost-agent.service")...); err != nil {
-			errs = append(errs, fmt.Sprintf("restore active state %q: %v", priorActiveWord, err))
-		}
-	}
-	if len(errs) > 0 {
-		return "; rollback incomplete: " + strings.Join(errs, "; ")
-	}
-	return ""
-}
-
-func syncDir(dir string) {
-	if f, err := os.Open(dir); err == nil {
-		_ = f.Sync()
-		_ = f.Close()
-	}
-}
-
-var (
-	linkFile     = os.Link
-	removeFile   = os.Remove
-	randomSuffix = func() (string, error) {
-		b := make([]byte, 8)
-		if _, err := rand.Read(b); err != nil {
-			return "", err
-		}
-		return hex.EncodeToString(b), nil
-	}
-)
-
-// backupManagedUnit moves the managed unit aside to a unique hidden backup name
-// in the same directory. It uses an exclusive hard link so an existing retained
-// backup is never overwritten; the original is unlinked only after the backup
-// link exists, and on any failure the original stays intact with no backup
-// artifact left behind.
-func backupManagedUnit(path string) (string, error) {
-	dir := filepath.Dir(path)
-	for i := 0; i < 32; i++ {
-		suffix, err := randomSuffix()
-		if err != nil {
-			return "", fmt.Errorf("cannot generate a backup name: %w", err)
-		}
-		backup := filepath.Join(dir, "."+filepath.Base(path)+".unit-backup-"+suffix)
-		if err := linkFile(path, backup); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				continue // candidate already exists; try another name
-			}
-			return "", err
-		}
-		if err := removeFile(path); err != nil {
-			_ = os.Remove(backup)
-			return "", fmt.Errorf("cannot remove the original after backing it up: %w", err)
-		}
-		syncDir(dir)
-		return backup, nil
-	}
-	return "", errors.New("could not allocate a unique backup name")
-}
-
-func restoreFromBackup(orig, backup string) error {
-	if err := os.Link(backup, orig); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("refusing to overwrite a concurrently created unit at %s; the original unit is preserved at %s", orig, backup)
-		}
-		return err
-	}
-	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	syncDir(filepath.Dir(orig))
-	return nil
-}
-
-func healthCheck(url string) error {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("expected 2xx, got HTTP %d", resp.StatusCode)
-	}
-	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "json") {
-		return fmt.Errorf("expected a JSON response, got %q", resp.Header.Get("Content-Type"))
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return err
-	}
-	var v map[string]any
-	if err := json.Unmarshal(body, &v); err != nil {
-		return fmt.Errorf("expected a JSON object response: %v", err)
-	}
-	return nil
-}
-
-// Install publishes a new unit and binary as a failure-atomic transaction:
-// inputs are validated, the replacement binary is staged first (no published
-// change), then the unit and binary are published, then the lifecycle runs.
-// Any copy, reload, enable or restart failure restores the prior unit and
-// binary (or removes them for a fresh install), so the installed state is
-// never a mix of old and new. A byte-identical unit and binary on an already
-// enabled and active service is a true no-op. Upgrade is the same call.
+// Install publishes a new unit and binary as a failure-atomic transaction. A
+// partial failure restores the prior unit, enablement, active state and binary.
 func (m Manager) Install(source string, paths Paths, listen, envfile string) error {
 	for _, v := range []struct{ val, name string }{
 		{listen, "listen"}, {paths.DataDir, "data-dir"},
@@ -888,95 +593,159 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) err
 			return err
 		}
 	}
-	// A repeat install/upgrade must not overwrite a foreign or modified unit,
-	// and the exact prior enabled/active states are snapshotted so a failed
-	// operation restores the previous systemd lifecycle state precisely.
+	if _, e := exec.LookPath("systemctl"); e != nil {
+		return errors.New("systemctl not found; is systemd installed?")
+	}
+	if e := ensureAccount(); e != nil {
+		return e
+	}
+	if e := mkdirData(paths.DataDir, 0o700); e != nil {
+		return e
+	}
+	_ = os.Chmod(paths.DataDir, 0o700)
+	_ = os.Chown(paths.DataDir, 0, 0)
+	if e := chownData(paths.DataDir); e != nil {
+		return e
+	}
 	oldUnit, hasUnit := readFileIfPresent(paths.Unit)
-	priorEnabledWord, priorActiveWord := "", ""
+	priorEnabled, priorActive := "", ""
 	if hasUnit {
-		if _, err := readManagedUnit(paths.Unit); err != nil {
+		if _, err := readManagedUnitFile(paths.Unit); err != nil {
 			return fmt.Errorf("refusing to overwrite the existing unit: %w", err)
 		}
 		var err error
-		if priorEnabledWord, err = m.rawState(paths, "is-enabled"); err != nil {
+		if priorEnabled, err = m.unitStateWord(paths, "is-enabled"); err != nil {
 			return err
 		}
-		if !restorableEnabledWord(priorEnabledWord) {
-			return fmt.Errorf("refusing to reinstall the service: prior enablement state %q cannot be restored exactly; disable or unmask it first", priorEnabledWord)
+		if !restorableEnabledWord(priorEnabled) {
+			return fmt.Errorf("refusing to reinstall the service: prior enablement state %q cannot be restored exactly; disable or unmask it first", priorEnabled)
 		}
-		if priorActiveWord, err = m.rawState(paths, "is-active"); err != nil {
+		if priorActive, err = m.unitStateWord(paths, "is-active"); err != nil {
 			return err
 		}
-		if !restorableActiveWord(priorActiveWord) {
-			return fmt.Errorf("refusing to reinstall the service: prior active state %q cannot be restored exactly; stop or restart it first", priorActiveWord)
+		if !restorableActiveWord(priorActive) {
+			return fmt.Errorf("refusing to reinstall the service: prior active state %q cannot be restored exactly; stop or restart it first", priorActive)
 		}
-		if !restorablePriorState(priorEnabledWord, priorActiveWord) {
-			return fmt.Errorf("refusing to reinstall the service: prior state %s+%s cannot be restored exactly; unmask it first", priorEnabledWord, priorActiveWord)
+		if !restorablePriorState(priorEnabled, priorActive) {
+			return fmt.Errorf("refusing to reinstall the service: prior state %s+%s cannot be restored exactly; unmask it first", priorEnabled, priorActive)
 		}
 	}
-	oldBinary, hasBinary := readFileIfPresent(paths.Binary)
-	// Stage the replacement binary before any published change.
-	stagedBin, err := stageCopy(source, paths.Binary, 0755)
-	if err != nil {
-		return err
+	hasBinary := false
+	if _, e := os.Stat(paths.Binary); e == nil {
+		hasBinary = true
 	}
-	defer func() { _ = os.Remove(stagedBin) }()
-	stagedBytes, err := os.ReadFile(stagedBin)
+	incomingDigest, err := fileSHA256(source)
 	if err != nil {
-		return err
+		return fmt.Errorf("read incoming executable: %w", err)
 	}
+	priorDigest := ""
+	if hasBinary {
+		priorDigest, _ = fileSHA256(paths.Binary)
+	}
+	binaryChanged := !hasBinary || incomingDigest != priorDigest
 	unit := Unit(paths, listen, envfile)
 	unitChanged := !hasUnit || string(oldUnit) != unit
-	binaryChanged := !hasBinary || !bytes.Equal(oldBinary, stagedBytes)
 	if !unitChanged && !binaryChanged {
-		// True no-op: byte-identical unit and binary already enabled and active.
-		if priorEnabledWord == "enabled" && priorActiveWord == "active" {
+		if priorEnabled == "enabled" && priorActive == "active" {
 			return nil
 		}
-		// Unchanged artifacts: only perform the lifecycle work required to
-		// reach the documented installed state (enabled and active).
 		steps := [][]string{}
-		if priorEnabledWord != "enabled" {
+		if priorEnabled != "enabled" {
 			steps = append(steps, []string{"enable", "watchpost-agent.service"})
 		}
-		if priorActiveWord != "active" {
+		if priorActive != "active" {
 			steps = append(steps, []string{"start", "watchpost-agent.service"})
 		}
 		for _, args := range steps {
 			if err := m.systemctlSuccess(paths, args...); err != nil {
-				if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasUnit, hasBinary, priorEnabledWord, priorActiveWord); rb != "" {
-					return fmt.Errorf("bringing the service to the installed state: %w%s", err, rb)
-				}
 				return fmt.Errorf("bringing the service to the installed state: %w", err)
 			}
 		}
 		return nil
 	}
-	// Publish the unit, then the binary.
-	if err := writeManagedUnit(paths.Unit, unit); err != nil {
-		return err
-	}
-	if err := os.Rename(stagedBin, paths.Binary); err != nil {
-		if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasUnit, hasBinary, priorEnabledWord, priorActiveWord); rb != "" {
-			return fmt.Errorf("cannot publish the binary: %w%s", err, rb)
+	if hasBinary {
+		if e := copyFile(paths.Binary, paths.Binary+".preinstall", 0o755); e != nil {
+			return e
 		}
-		return fmt.Errorf("cannot publish the binary: %w", err)
 	}
-	for _, step := range []struct {
-		verb string
-		args []string
-	}{
-		{"reload", []string{"daemon-reload"}},
-		{"enable", []string{"enable", "watchpost-agent.service"}},
-		{"restart", []string{"restart", "watchpost-agent.service"}},
-	} {
-		if err := m.systemctlSuccess(paths, step.args...); err != nil {
-			if rb := m.rollbackInstall(paths, oldUnit, oldBinary, hasUnit, hasBinary, priorEnabledWord, priorActiveWord); rb != "" {
-				return fmt.Errorf("%s failed: %w%s", step.verb, err, rb)
+	installOK := false
+	restore := func() string {
+		var errs []string
+		_ = m.systemctlSuccess(paths, "stop", "watchpost-agent.service")
+		_ = m.systemctlSuccess(paths, "disable", "watchpost-agent.service")
+		if hasBinary {
+			if e := copyFile(paths.Binary+".preinstall", paths.Binary, 0o755); e != nil {
+				errs = append(errs, fmt.Sprintf("restore binary: %v", e))
 			}
-			return fmt.Errorf("%s failed: %w", step.verb, err)
+		} else {
+			_ = os.Remove(paths.Binary)
+		}
+		_ = os.Remove(paths.Binary + ".preinstall")
+		if hasUnit {
+			if e := writeFileAtomic(paths.Unit, oldUnit, 0644); e != nil {
+				errs = append(errs, fmt.Sprintf("restore unit: %v", e))
+			}
+		} else {
+			_ = os.Remove(paths.Unit)
+		}
+		if e := m.systemctlSuccess(paths, "daemon-reload"); e != nil {
+			errs = append(errs, fmt.Sprintf("reload systemd: %v", e))
+		}
+		if hasUnit {
+			if priorEnabled == "enabled" {
+				if e := m.systemctlSuccess(paths, "enable", "watchpost-agent.service"); e != nil {
+					errs = append(errs, fmt.Sprintf("re-enable: %v", e))
+				}
+			} else if priorEnabled != "" && priorEnabled != "disabled" {
+				errs = append(errs, fmt.Sprintf("prior enablement %q cannot be restored", priorEnabled))
+			} else {
+				_ = m.systemctlSuccess(paths, "disable", "watchpost-agent.service")
+			}
+			if priorActive == "active" {
+				if e := m.systemctlSuccess(paths, "start", "watchpost-agent.service"); e != nil {
+					errs = append(errs, fmt.Sprintf("restart prior service: %v", e))
+				}
+			} else if priorActive != "" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+				errs = append(errs, fmt.Sprintf("prior active state %q cannot be restored", priorActive))
+			} else {
+				_ = m.systemctlSuccess(paths, "stop", "watchpost-agent.service")
+			}
+		}
+		if len(errs) == 0 {
+			return ""
+		}
+		return "; rollback incomplete: " + strings.Join(errs, "; ")
+	}
+	defer func() {
+		if !installOK {
+			_ = restore()
+		}
+	}()
+	if e := writeManagedUnit(paths.Unit, unit); e != nil {
+		return e
+	}
+	if e := copyFile(source, paths.Binary, 0o755); e != nil {
+		return e
+	}
+	changed := unitChanged || binaryChanged
+	steps := [][]string{{"daemon-reload"}}
+	if changed {
+		steps = append(steps, []string{"enable", "watchpost-agent.service"}, []string{"restart", "watchpost-agent.service"})
+	} else {
+		if priorEnabled != "enabled" {
+			steps = append(steps, []string{"enable", "watchpost-agent.service"})
+		}
+		if priorActive != "active" {
+			steps = append(steps, []string{"start", "watchpost-agent.service"})
 		}
 	}
+	for _, a := range steps {
+		if err := m.systemctlSuccess(paths, a...); err != nil {
+			return fmt.Errorf("systemctl %s: %w (installation rolled back)", strings.Join(a, " "), err)
+		}
+	}
+	installOK = true
+	_ = os.Remove(paths.Binary + ".preinstall")
 	return nil
 }
 
@@ -985,31 +754,20 @@ func (m Manager) Upgrade(source string, paths Paths, listen, envfile string) err
 	return m.Install(source, paths, listen, envfile)
 }
 
-func (m Manager) Start(paths Paths) error {
-	return m.action(paths, "start")
-}
-func (m Manager) Stop(paths Paths) error {
-	return m.action(paths, "stop")
-}
+func (m Manager) Start(paths Paths) error { return m.lifecycle(paths, "start") }
+func (m Manager) Stop(paths Paths) error  { return m.lifecycle(paths, "stop") }
 func (m Manager) Restart(paths Paths) error {
-	return m.action(paths, "restart")
+	return m.lifecycle(paths, "restart")
 }
+func (m Manager) Enable(paths Paths) error  { return m.lifecycle(paths, "enable") }
+func (m Manager) Disable(paths Paths) error { return m.lifecycle(paths, "disable") }
 
-func (m Manager) action(paths Paths, verb string) error {
+func (m Manager) lifecycle(paths Paths, verb string) error {
 	if err := m.requireManaged(paths, verb); err != nil {
 		return err
 	}
-	if verb == "start" || verb == "restart" {
-		if err := m.revalidateEnv(paths); err != nil {
-			return fmt.Errorf("refusing to %s the service: %w", verb, err)
-		}
-	}
-	out, code, err := m.systemctl(paths, verb, "watchpost-agent.service")
-	if err != nil {
-		return fmt.Errorf("cannot run systemctl %s: %w", verb, err)
-	}
-	if code != 0 {
-		return fmt.Errorf("systemctl %s exited %d: %s", verb, code, bounded(strings.TrimSpace(out)))
+	if err := m.systemctlSuccess(paths, verb, "watchpost-agent.service"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1019,7 +777,7 @@ func (m Manager) action(paths Paths, verb string) error {
 // configuration. Stop, logs and uninstall intentionally skip this so operators
 // are never trapped with an unmanageable service.
 func (m Manager) revalidateEnv(paths Paths) error {
-	meta, err := readManagedUnit(paths.Unit)
+	meta, err := readManagedUnitFile(paths.Unit)
 	if err != nil {
 		return err
 	}
@@ -1033,21 +791,21 @@ func (m Manager) revalidateEnv(paths Paths) error {
 }
 
 func (m Manager) Status(out io.Writer, paths Paths, version string) error {
-	meta, err := readManagedUnit(paths.Unit)
+	meta, err := readManagedUnitFile(paths.Unit)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("the service is not installed (no unit at %s)", paths.Unit)
 		}
 		return fmt.Errorf("the service unit is not valid: %w", err)
 	}
-	enabled, err := m.queryState(paths, "is-enabled")
+	enabled, err := m.unitStateWord(paths, "is-enabled")
 	if err != nil {
 		return fmt.Errorf("cannot determine enablement state: %w", err)
 	}
 	if err := m.revalidateEnv(paths); err != nil {
 		return fmt.Errorf("cannot report status: %w", err)
 	}
-	active, err := m.queryState(paths, "is-active")
+	active, err := m.unitStateWord(paths, "is-active")
 	if err != nil {
 		return fmt.Errorf("cannot determine service state: %w", err)
 	}
@@ -1057,12 +815,14 @@ func (m Manager) Status(out io.Writer, paths Paths, version string) error {
 	fmt.Fprintf(out, "enabled: %s\n", enabled)
 	fmt.Fprintf(out, "active:  %s\n", active)
 	fmt.Fprintf(out, "pid:     %s\n", strings.TrimSpace(pid))
+	fmt.Fprintf(out, "user:    %s\n", ServiceUser)
 	fmt.Fprintf(out, "version: %s\n", version)
 	fmt.Fprintf(out, "listen:  %s\n", meta.listen)
+	fmt.Fprintf(out, "data:    %s\n", paths.DataDir)
 	if meta.envfile != "" {
 		fmt.Fprintf(out, "env:     %s\n", meta.envfile)
 	}
-	if active != stateActive {
+	if active != "active" {
 		return fmt.Errorf("service is %q; expected active", active)
 	}
 	if err := healthCheck("http://" + meta.listen + meta.health); err != nil {
@@ -1073,16 +833,34 @@ func (m Manager) Status(out io.Writer, paths Paths, version string) error {
 	return nil
 }
 
+var healthCheck = healthCheckReal
+
+func healthCheckReal(url string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("expected 2xx, got HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	var v map[string]any
+	if err := json.Unmarshal(body, &v); err != nil {
+		return fmt.Errorf("expected a JSON object response: %v", err)
+	}
+	return nil
+}
+
 func (m Manager) Logs(follow bool, out io.Writer, paths Paths) error {
 	if err := m.requireManaged(paths, "view logs for"); err != nil {
 		return err
 	}
-	var args []string
-	if paths.System {
-		args = []string{"--unit", "watchpost-agent.service"}
-	} else {
-		args = []string{"--user-unit", "watchpost-agent.service"}
-	}
+	args := []string{"--unit", "watchpost-agent.service"}
 	if follow {
 		args = append(args, "-f")
 		code, err := m.Stream("journalctl", args...)
@@ -1105,73 +883,255 @@ func (m Manager) Logs(follow bool, out io.Writer, paths Paths) error {
 	return nil
 }
 
+// Uninstall stops and disables the service, removes the unit and reloads
+// systemd. The data directory and installed binary are deliberately preserved.
 func (m Manager) Uninstall(out io.Writer, paths Paths) error {
-	if _, err := readManagedUnit(paths.Unit); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("the service is not installed")
-		}
-		return fmt.Errorf("refusing to uninstall the service: %w", err)
-	}
-	active, err := m.queryState(paths, "is-active")
-	if err != nil {
-		return fmt.Errorf("cannot determine service state before uninstall: %w", err)
-	}
-	if active == stateActive || active == stateReloading || active == stateRefreshing || active == stateTransition {
-		if err := m.systemctlSuccess(paths, "stop", "watchpost-agent.service"); err != nil {
-			return fmt.Errorf("stop failed: %w", err)
-		}
-		after, err := m.queryState(paths, "is-active")
-		if err != nil {
-			return fmt.Errorf("cannot verify the service stopped after stop: %w", err)
-		}
-		if after != stateInactive {
-			return fmt.Errorf("the service still reports %q after stop; not removing the unit", stateName(after))
-		}
-	} else if active == stateInactive {
-		fmt.Fprintf(out, "note: the service is inactive; nothing to stop\n")
-	} else {
-		return fmt.Errorf("the service is in %q; cannot confirm it is safely stopped before uninstall", stateName(active))
-	}
-	enabled, err := m.queryState(paths, "is-enabled")
-	if err != nil {
-		return fmt.Errorf("cannot determine enablement before uninstall: %w", err)
-	}
-	if enabled == stateEnabled {
-		if err := m.systemctlSuccess(paths, "disable", "watchpost-agent.service"); err != nil {
-			return fmt.Errorf("disable failed: %w", err)
-		}
-		after, err := m.queryState(paths, "is-enabled")
-		if err != nil {
-			return fmt.Errorf("cannot verify the service disabled after disable: %w", err)
-		}
-		if after != stateNotEnabled && after != stateMasked {
-			return fmt.Errorf("the service still reports %q after disable; not removing the unit", stateName(after))
-		}
-	} else if enabled == stateNotEnabled || enabled == stateMasked {
-		fmt.Fprintf(out, "note: the service is %s; nothing to disable\n", stateName(enabled))
-	} else {
-		return fmt.Errorf("enablement is %q; cannot confirm it is disabled before uninstall", stateName(enabled))
-	}
-	backup, err := backupManagedUnit(paths.Unit)
-	if err != nil {
-		return fmt.Errorf("cannot move the unit aside for uninstall: %w", err)
-	}
-	if err := m.systemctlSuccess(paths, "daemon-reload"); err != nil {
-		if restoreErr := restoreFromBackup(paths.Unit, backup); restoreErr != nil {
-			return fmt.Errorf("reloading systemd after removing the unit: %w; additionally failed to restore the unit: %v", err, restoreErr)
-		}
-		if reloadErr := m.systemctlSuccess(paths, "daemon-reload"); reloadErr != nil {
-			return fmt.Errorf("reloading systemd after removing the unit: %w; the unit was restored but the follow-up reload also failed: %v", err, reloadErr)
-		}
-		return fmt.Errorf("reloading systemd after removing the unit: %w; the unit was restored", err)
-	}
-	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := m.requireManaged(paths, "uninstall"); err != nil {
 		return err
 	}
-	syncDir(filepath.Dir(paths.Unit))
-	if err := os.Remove(paths.Binary); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	if e := m.systemctlSuccess(paths, "disable", "--now", "watchpost-agent.service"); e != nil {
+		return fmt.Errorf("uninstall: %w", e)
 	}
-	fmt.Fprintf(out, "Removed the Watchpost Agent service. Agent data in %s was preserved.\n", paths.DataDir)
+	if e := os.Remove(paths.Unit); e != nil && !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
+	if e := m.systemctlSuccess(paths, "daemon-reload"); e != nil {
+		return e
+	}
+	fmt.Fprintf(out, "Removed the Watchpost Agent service. Agent data in %s and the binary were preserved.\n", paths.DataDir)
 	return nil
+}
+
+// readPriorActiveMarker reads and validates the prior-state marker.
+func (m Manager) readPriorActiveMarker(paths Paths) (string, error) {
+	b, err := os.ReadFile(paths.Binary + ".prior-active")
+	if err != nil {
+		return "", err
+	}
+	priorActive := strings.TrimSpace(string(b))
+	if priorActive != "active" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+		return "", fmt.Errorf("invalid prior-state marker %q", priorActive)
+	}
+	return priorActive, nil
+}
+
+// Update replaces the binary with a checksum-verified artifact, preserving the
+// prior running/stopped state and enablement, and retaining rollback metadata.
+func (m Manager) Update(artifact, want string, paths Paths) error {
+	if err := m.requireManaged(paths, "update"); err != nil {
+		return err
+	}
+	if err := Verify(artifact, want); err != nil {
+		return err
+	}
+	priorActive, err := m.unitStateWord(paths, "is-active")
+	if err != nil {
+		return fmt.Errorf("update: cannot determine current service state: %w", err)
+	}
+	priorActive = strings.TrimSpace(priorActive)
+	if priorActive != "active" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+		return fmt.Errorf("update: unexpected service state %q; refusing to update", priorActive)
+	}
+	wasActive := priorActive == "active"
+	if _, e := os.Stat(paths.Binary); e == nil {
+		if e := copyFile(paths.Binary, paths.Binary+".rollback", 0o755); e != nil {
+			return e
+		}
+		if e := writeFileAtomic(paths.Binary+".prior-active", []byte(priorActive), 0o600); e != nil {
+			_ = os.Remove(paths.Binary + ".rollback")
+			return fmt.Errorf("update: cannot record rollback state: %w", e)
+		}
+	}
+	if e := copyFile(artifact, paths.Binary, 0o755); e != nil {
+		return e
+	}
+	if !wasActive {
+		return nil
+	}
+	if out, code, err := m.systemctl(paths, "restart", "watchpost-agent.service"); err != nil || code != 0 {
+		updateErr := fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errOrCode(err, code))
+		return updateFailureWithRecovery(updateErr, m.restoreAfterFailedUpdate(paths))
+	}
+	if e := m.verifyActiveAndHealthy(paths); e != nil {
+		updateErr := fmt.Errorf("update: new binary failed to become healthy: %w", e)
+		return updateFailureWithRecovery(updateErr, m.restoreAfterFailedUpdate(paths))
+	}
+	return nil
+}
+
+func errOrCode(err error, code int) error {
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("exited %d", code)
+}
+
+func updateFailureWithRecovery(updateErr, recoveryErr error) error {
+	if recoveryErr != nil {
+		return fmt.Errorf("%v; recovery also failed: %v", updateErr, recoveryErr)
+	}
+	return updateErr
+}
+
+func (m Manager) verifyActiveAndHealthy(paths Paths) error {
+	listen := DefaultListen
+	if meta, err := readManagedUnitFile(paths.Unit); err == nil && meta.listen != "" {
+		listen = meta.listen
+	}
+	deadline := time.Now().Add(healthWindow())
+	for time.Now().Before(deadline) {
+		active, _ := m.unitStateWord(paths, "is-active")
+		if strings.TrimSpace(active) == "active" {
+			if err := healthCheck("http://" + listen + healthPath); err == nil {
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("service did not become active and healthy within the health window")
+}
+
+var healthWindow = func() time.Duration { return 30 * time.Second }
+
+// restoreAfterFailedUpdate verifiably restores the previous version and its
+// operational state after a failed update. It fails closed if the prior-state
+// marker is missing or invalid at recovery time.
+func (m Manager) restoreAfterFailedUpdate(paths Paths) error {
+	b, err := os.ReadFile(paths.Binary + ".prior-active")
+	if err != nil {
+		return fmt.Errorf("recovery: no prior-state marker: %w", err)
+	}
+	priorActive := strings.TrimSpace(string(b))
+	if priorActive != "active" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+		return fmt.Errorf("recovery: invalid prior-state marker %q", priorActive)
+	}
+	if e := m.systemctlSuccess(paths, "stop", "watchpost-agent.service"); e != nil {
+		return fmt.Errorf("recovery: stop failed service: %w", e)
+	}
+	if e := copyFile(paths.Binary+".rollback", paths.Binary, 0o755); e != nil {
+		return fmt.Errorf("recovery: restore old binary: %w", e)
+	}
+	if priorActive == "active" {
+		if e := m.systemctlSuccess(paths, "restart", "watchpost-agent.service"); e != nil {
+			return fmt.Errorf("recovery: restart old service: %w", e)
+		}
+		if e := m.verifyActiveAndHealthy(paths); e != nil {
+			return fmt.Errorf("recovery: restored service not healthy: %w", e)
+		}
+	}
+	_ = os.Remove(paths.Binary + ".prior-active")
+	_ = os.Remove(paths.Binary + ".rollback")
+	return nil
+}
+
+// Rollback restores the previous version and its operational state.
+func (m Manager) Rollback(paths Paths) error {
+	if err := m.requireManaged(paths, "rollback"); err != nil {
+		return err
+	}
+	if _, e := os.Stat(paths.Binary + ".rollback"); e != nil {
+		return errors.New("no rollback binary available")
+	}
+	b, err := os.ReadFile(paths.Binary + ".prior-active")
+	if err != nil {
+		return fmt.Errorf("rollback: no prior-state marker; refusing to guess the service state")
+	}
+	priorActive := strings.TrimSpace(string(b))
+	if priorActive != "active" && priorActive != "inactive" && priorActive != "dead" && priorActive != "failed" {
+		return fmt.Errorf("rollback: invalid prior-state marker %q", priorActive)
+	}
+	wasActive := priorActive == "active"
+	cur := paths.Binary + ".failed"
+	_ = os.Remove(cur)
+	if e := os.Rename(paths.Binary, cur); e != nil {
+		return e
+	}
+	if e := os.Rename(paths.Binary+".rollback", paths.Binary); e != nil {
+		_ = os.Rename(cur, paths.Binary)
+		return e
+	}
+	if !wasActive {
+		_ = os.Remove(paths.Binary + ".prior-active")
+		_ = os.Remove(paths.Binary + ".rollback")
+		return nil
+	}
+	if e := m.systemctlSuccess(paths, "restart", "watchpost-agent.service"); e != nil {
+		return e
+	}
+	if e := m.verifyActiveAndHealthy(paths); e != nil {
+		return e
+	}
+	_ = os.Remove(paths.Binary + ".prior-active")
+	_ = os.Remove(paths.Binary + ".rollback")
+	return nil
+}
+
+// Verify returns nil when the artifact's SHA-256 matches want.
+func Verify(path, want string) error {
+	b, e := os.ReadFile(path)
+	if e != nil {
+		return e
+	}
+	h := sha256.Sum256(b)
+	got := hex.EncodeToString(h[:])
+	if !strings.EqualFold(got, strings.TrimSpace(want)) {
+		return fmt.Errorf("checksum mismatch: got %s", got)
+	}
+	return nil
+}
+
+func readFileIfPresent(path string) ([]byte, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+func restorableEnabledWord(word string) bool {
+	switch word {
+	case "enabled", "enabled-runtime", "masked", "masked-runtime", "disabled":
+		return true
+	}
+	return false
+}
+
+func restorableActiveWord(word string) bool {
+	switch word {
+	case "active", "inactive":
+		return true
+	}
+	return false
+}
+
+func restorablePriorState(enabledWord, activeWord string) bool {
+	if !restorableEnabledWord(enabledWord) || !restorableActiveWord(activeWord) {
+		return false
+	}
+	if (enabledWord == "masked" || enabledWord == "masked-runtime") && activeWord == "active" {
+		return false
+	}
+	return true
+}
+
+func chownAgent(path string) error {
+	uid, gid, e := lookupServiceIDs()
+	if e != nil {
+		return e
+	}
+	return os.Chown(path, uid, gid)
+}
+
+func lookupServiceIDs() (int, int, error) {
+	u, e := user.Lookup(ServiceUser)
+	if e != nil {
+		return 0, 0, fmt.Errorf("service user not found: %w", e)
+	}
+	uid, _ := strconv.Atoi(u.Uid)
+	g, e := user.LookupGroup(ServiceGroup)
+	if e != nil {
+		return 0, 0, fmt.Errorf("service group not found: %w", e)
+	}
+	gid, _ := strconv.Atoi(g.Gid)
+	return uid, gid, nil
 }

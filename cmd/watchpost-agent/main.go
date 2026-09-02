@@ -27,23 +27,198 @@ import (
 var version = "dev"
 
 func main() {
+	// Service-management commands must remain usable even when the application
+	// configuration is unhealthy, so dispatch before any runtime config load.
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		os.Exit(runServiceCommand(os.Args[2:]))
+	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "watchpost-agent:", err)
 		os.Exit(1)
 	}
 }
 
+// runServiceCommand dispatches `watchpost-agent service <command>` operating the
+// Watchpost Agent systemd **system** unit. Exit codes: 0 success, 1 operational
+// failure, 2 usage error (canonical Web Fleet convention).
+func runServiceCommand(args []string) int {
+	cmd := "status"
+	var flags, positional []string
+	for _, a := range args {
+		if a != "" && !strings.HasPrefix(a, "-") {
+			if cmd == "status" && len(positional) == 0 {
+				cmd = a
+				continue
+			}
+			positional = append(positional, a)
+			continue
+		}
+		flags = append(flags, a)
+	}
+	usage := func(msg string) int {
+		fmt.Fprintf(os.Stderr, "watchpost-agent service %s: %s\n", cmd, msg)
+		return 2
+	}
+	if len(flags) > 0 {
+		switch cmd {
+		case "install", "upgrade":
+			for i := 0; i < len(flags); i++ {
+				switch flags[i] {
+				case "--listen":
+					if i+1 < len(flags) {
+						i++
+					} else {
+						return usage("--listen requires an address")
+					}
+				case "--env-file":
+					if i+1 < len(flags) {
+						i++
+					} else {
+						return usage("--env-file requires a path")
+					}
+				default:
+					return usage("unknown flag " + flags[i])
+				}
+			}
+		case "logs":
+			if len(flags) > 1 || flags[0] != "--follow" {
+				return usage("logs accepts only --follow")
+			}
+		default:
+			return usage("no flags are accepted for " + cmd)
+		}
+	}
+	paths := service.DefaultPaths()
+	switch cmd {
+	case "install", "upgrade":
+		if len(positional) != 0 {
+			return usage(cmd + " takes no positional arguments")
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent:", err)
+			return 1
+		}
+		listen, envfile := service.DefaultListen, ""
+		visited := map[string]bool{}
+		for i := 0; i < len(flags); i++ {
+			switch flags[i] {
+			case "--listen":
+				if i+1 < len(flags) {
+					i++
+					listen = flags[i]
+					visited["listen"] = true
+				}
+			case "--env-file":
+				if i+1 < len(flags) {
+					i++
+					envfile = flags[i]
+					visited["env-file"] = true
+				}
+			}
+		}
+		manager := service.New()
+		if meta, ok, err := manager.ExistingMeta(paths); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent:", err)
+			return 1
+		} else if ok {
+			listen, envfile = service.PreserveInstallValues(meta, visited["listen"], listen, visited["env-file"], envfile)
+		}
+		if err := manager.Install(executable, paths, listen, envfile); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "watchpost-agent.service installed and active.")
+		return 0
+	case "uninstall":
+		if len(positional) != 0 {
+			return usage("uninstall takes no positional arguments")
+		}
+		manager := service.New()
+		if err := manager.Uninstall(os.Stdout, paths); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service uninstall:", err)
+			return 1
+		}
+		return 0
+	case "start", "stop", "restart", "enable", "disable":
+		if len(positional) != 0 {
+			return usage(cmd + " takes no positional arguments")
+		}
+		manager := service.New()
+		if err := lifecycleErr(manager, paths, cmd); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "watchpost-agent.service "+cmd+"ed.")
+		return 0
+	case "status":
+		if len(positional) != 0 {
+			return usage("status takes no positional arguments")
+		}
+		manager := service.New()
+		if err := manager.Status(os.Stdout, paths, version); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service status:", err)
+			return 1
+		}
+		return 0
+	case "logs":
+		if len(positional) != 0 {
+			return usage("logs takes no positional arguments")
+		}
+		manager := service.New()
+		follow := len(flags) > 0 && flags[0] == "--follow"
+		if err := manager.Logs(follow, os.Stdout, paths); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service logs:", err)
+			return 1
+		}
+		return 0
+	case "update":
+		if len(positional) != 2 {
+			return usage("usage: watchpost-agent service update ARTIFACT SHA256")
+		}
+		manager := service.New()
+		if err := manager.Update(positional[0], positional[1], paths); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service update:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "watchpost-agent.service updated and restarted.")
+		return 0
+	case "rollback":
+		if len(positional) != 0 {
+			return usage("rollback takes no positional arguments")
+		}
+		manager := service.New()
+		if err := manager.Rollback(paths); err != nil {
+			fmt.Fprintln(os.Stderr, "watchpost-agent service rollback:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stdout, "watchpost-agent.service rolled back and restarted.")
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "watchpost-agent: unknown service command %q\n\nUsage: watchpost-agent service <install|uninstall|start|stop|restart|status|enable|disable|logs|update|rollback> [flags]\n", cmd)
+		return 2
+	}
+}
+
+func lifecycleErr(m service.Manager, paths service.Paths, verb string) error {
+	switch verb {
+	case "start":
+		return m.Start(paths)
+	case "stop":
+		return m.Stop(paths)
+	case "restart":
+		return m.Restart(paths)
+	case "enable":
+		return m.Enable(paths)
+	case "disable":
+		return m.Disable(paths)
+	}
+	return fmt.Errorf("unknown lifecycle verb")
+}
+
 func run(arguments []string) error {
 	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure" || arguments[0] == "rotate" || arguments[0] == "unpair" || arguments[0] == "reset") {
 		return localCommand(arguments[0], arguments[1:])
-	}
-	// `watchpost-agent service ...` is the canonical namespace; the top-level
-	// forms below remain as compatibility aliases.
-	if len(arguments) > 1 && arguments[0] == "service" {
-		return serviceCommand(arguments[1], arguments[2:])
-	}
-	if len(arguments) > 0 && (arguments[0] == "install" || arguments[0] == "upgrade" || arguments[0] == "start" || arguments[0] == "stop" || arguments[0] == "restart" || arguments[0] == "status" || arguments[0] == "logs" || arguments[0] == "uninstall") {
-		return serviceCommand(arguments[0], arguments[1:])
 	}
 	flags := flag.NewFlagSet("watchpost-agent", flag.ContinueOnError)
 	listen := flags.String("listen", "127.0.0.1:8090", "local agent UI address")
@@ -234,64 +409,11 @@ func localCommand(action string, arguments []string) error {
 	return fmt.Errorf("unknown local action")
 }
 
-func serviceCommand(action string, arguments []string) error {
-	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)
-	system := flags.Bool("system", false, "manage a system-wide service (not yet supported)")
-	follow := flags.Bool("follow", false, "follow new journal output")
-	listen := flags.String("listen", "127.0.0.1:8090", "local agent UI address recorded in the unit")
-	envFile := flags.String("env-file", "", "absolute owner-only environment file for WATCHPOST_AGENT_* variables")
-	if err := flags.Parse(arguments); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected service arguments")
-	}
-	paths, err := service.Resolve(*system)
-	if err != nil {
-		return err
-	}
-	manager := service.New()
-	switch action {
-	case "install", "upgrade":
-		executable, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		// Preserve installed configuration on repeat install/upgrade unless the
-		// operator explicitly overrides it.
-		visited := map[string]bool{}
-		flags.Visit(func(f *flag.Flag) { visited[f.Name] = true })
-		if meta, ok, err := manager.ExistingMeta(paths); err != nil {
-			return err
-		} else if ok {
-			*listen, *envFile = service.PreserveInstallValues(meta, visited["listen"], *listen, visited["env-file"], *envFile)
-		}
-		return manager.Install(executable, paths, *listen, *envFile)
-	case "start":
-		return manager.Start(paths)
-	case "stop":
-		return manager.Stop(paths)
-	case "restart":
-		return manager.Restart(paths)
-	case "status":
-		return manager.Status(os.Stdout, paths, version)
-	case "logs":
-		return manager.Logs(*follow, os.Stdout, paths)
-	case "uninstall":
-		return manager.Uninstall(os.Stdout, paths)
-	}
-	return fmt.Errorf("unknown service action")
-}
-
 func defaultDataDir() string {
 	if value := os.Getenv("WATCHPOST_AGENT_DATA_DIR"); value != "" {
 		return value
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".watchpost-agent"
-	}
-	return filepath.Join(home, ".local", "share", "watchpost-agent")
+	return "/var/lib/watchpost-agent"
 }
 
 // appOptions reads remote-management security options. Binding to a
