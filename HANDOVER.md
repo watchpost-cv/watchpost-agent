@@ -13,10 +13,14 @@ atomic JSON persistence, health/status endpoints and the embedded Nift-built
 unpaired interface. Preserve the invariant that an unpaired agent is a quiet,
 valid state.
 
-WP-A03 adds idempotent Linux systemd installation before pairing, with per-user
-defaults, explicit `--system`, atomic executable/unit replacement and restart
-on upgrade. Uninstall deliberately retains private state; reset is a separate
-lifecycle operation.
+WP-A03 adds idempotent Linux systemd installation before pairing, as a
+machine service: a systemd **system** unit under a dedicated unprivileged
+`watchpost-agent` account, with `/var/lib/watchpost-agent` data and
+root-protected `/etc/watchpost-agent` configuration, atomic executable/unit
+replacement, restart on upgrade, and the full canonical service CLI
+(install|uninstall|start|stop|restart|status|enable|disable|logs|update|rollback).
+Uninstall deliberately retains private state and the installed binary; reset is a
+separate lifecycle operation.
 
 WP-A04 protects the loopback UI with first-run setup, a minimum seven-character
 password, iterated salted hashes, memory-only sessions, SameSite/HttpOnly
