@@ -45,9 +45,12 @@ func TestAgentInstallStateMatrix(t *testing.T) {
 			exe := filepath.Join(t.TempDir(), "agent2")
 			os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 			if tc.accepted {
-				// Reinstall with a changed listen reaches the activation path.
-				r.script["systemctl daemon-reload"] = fakeResult{}
-				r.script["systemctl enable watchpost-agent.service"] = fakeResult{out: "failed to enable", code: 1}
+				// Reinstall with a changed listen reaches the forward path.
+				// Force a rollback state-independently: the forward daemon-reload
+				// fails (1st call), the rollback daemon-reload succeeds (2nd).
+				r.seq["systemctl daemon-reload"] = []fakeResult{{out: "reload failed", code: 1}, {}}
+				r.script["systemctl enable watchpost-agent.service"] = fakeResult{}
+				r.script["systemctl enable --runtime watchpost-agent.service"] = fakeResult{}
 				r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
 				r.script["systemctl stop watchpost-agent.service"] = fakeResult{}
 				r.script["systemctl disable watchpost-agent.service"] = fakeResult{}
@@ -161,6 +164,127 @@ func TestAgentDataDirRejectsSystemRoots(t *testing.T) {
 		if len(r.log) != 0 {
 			t.Fatalf("install of %q touched systemctl", root)
 		}
+	}
+}
+
+func TestAgentDataDirRejectsUnderSystemTree(t *testing.T) {
+	m, r, paths := fakeStrictManager(t)
+	for _, root := range []string{"/etc/watchpost-agent-data", "/usr/local/agent", "/bin/agent"} {
+		p := paths
+		p.DataDir = root
+		exe := filepath.Join(t.TempDir(), "agent2")
+		os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		if e := m.Install(exe, p, DefaultListen, ""); e == nil {
+			t.Fatalf("install accepted data directory %q beneath a system tree", root)
+		}
+		if len(r.log) != 0 {
+			t.Fatalf("install of %q touched systemctl", root)
+		}
+	}
+	if e := validateDataDirPath("/var/lib/watchpost-agent"); e != nil {
+		t.Fatalf("canonical /var/lib/watchpost-agent rejected: %v", e)
+	}
+	if e := validateDataDirPath("/srv/watchpost-agent"); e != nil {
+		t.Fatalf("canonical /srv/watchpost-agent rejected: %v", e)
+	}
+}
+
+func TestAgentDataDirLeafOnlyCreation(t *testing.T) {
+	m, r, paths := fakeStrictManager(t)
+	parent := t.TempDir()
+	newData := filepath.Join(parent, "agent-data")
+	p := paths
+	p.DataDir = newData
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	created := ""
+	oldMkdir := mkdirData
+	mkdirData = func(path string, mode os.FileMode) error {
+		created = path
+		return os.Mkdir(path, mode)
+	}
+	defer func() { mkdirData = oldMkdir }()
+	r.script["systemctl daemon-reload"] = fakeResult{}
+	r.script["systemctl enable watchpost-agent.service"] = fakeResult{}
+	r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+	if e := m.Install(exe, p, DefaultListen, ""); e != nil {
+		t.Fatal(e)
+	}
+	if created != newData {
+		t.Fatalf("created path = %q, want the leaf %q (no parents)", created, newData)
+	}
+	if _, e := os.Stat(newData); e != nil {
+		t.Fatalf("leaf was not actually created: %v", e)
+	}
+}
+
+func TestAgentDataDirRefusesMissingParent(t *testing.T) {
+	m, r, paths := fakeStrictManager(t)
+	dir := t.TempDir()
+	missingParent := filepath.Join(dir, "does-not-exist")
+	dataDir := filepath.Join(missingParent, "agent-data")
+	p := paths
+	p.DataDir = dataDir
+	exe := filepath.Join(t.TempDir(), "agent2")
+	os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	if e := m.Install(exe, p, DefaultListen, ""); e == nil {
+		t.Fatal("install created a data directory under a missing parent")
+	}
+	if _, e := os.Lstat(missingParent); !os.IsNotExist(e) {
+		t.Fatalf("missing parent %q was created by the installer", missingParent)
+	}
+	if len(r.log) != 0 {
+		t.Fatalf("missing-parent install still ran systemctl: %v", r.log)
+	}
+}
+
+func TestAgentSuccessfulReinstallPreservesPriorState(t *testing.T) {
+	matrix := []agentStateMatrixEntry{
+		{name: "enabled+active", enabled: "enabled", active: "active", wantEnableSeq: []string{"systemctl enable watchpost-agent.service"}, wantActive: "restart"},
+		{name: "enabled+inactive", enabled: "enabled", active: "inactive", wantEnableSeq: []string{"systemctl enable watchpost-agent.service"}, wantActive: "stop"},
+		{name: "enabled-runtime+active", enabled: "enabled-runtime", active: "active", wantEnableSeq: []string{"systemctl enable --runtime watchpost-agent.service"}, wantActive: "restart"},
+		{name: "enabled-runtime+inactive", enabled: "enabled-runtime", active: "inactive", wantEnableSeq: []string{"systemctl enable --runtime watchpost-agent.service"}, wantActive: "stop"},
+		{name: "disabled+active", enabled: "disabled", active: "active", wantEnableSeq: []string{}, wantActive: "restart"},
+		{name: "disabled+inactive", enabled: "disabled", active: "inactive", wantEnableSeq: []string{}, wantActive: "stop"},
+	}
+	for _, tc := range matrix {
+		t.Run(tc.name, func(t *testing.T) {
+			m, r, paths := fakeStrictManager(t)
+			installManagedUnit(t, paths)
+			setState(r, tc.enabled, tc.active)
+			exe := filepath.Join(t.TempDir(), "agent2")
+			os.WriteFile(exe, []byte("#!/bin/sh\n# changed binary\nexit 0\n"), 0o755)
+			r.script["systemctl daemon-reload"] = fakeResult{}
+			r.script["systemctl enable watchpost-agent.service"] = fakeResult{}
+			r.script["systemctl enable --runtime watchpost-agent.service"] = fakeResult{}
+			r.script["systemctl disable watchpost-agent.service"] = fakeResult{}
+			r.script["systemctl restart watchpost-agent.service"] = fakeResult{}
+			r.script["systemctl stop watchpost-agent.service"] = fakeResult{}
+			if e := m.Install(exe, paths, "127.0.0.1:9999", ""); e != nil {
+				t.Fatalf("successful reinstall failed: %v", e)
+			}
+			for _, want := range tc.wantEnableSeq {
+				if !contains(r.log, want) {
+					t.Fatalf("reinstall did not apply enablement %q: log=%v", tc.enabled, r.log)
+				}
+			}
+			if tc.enabled == "enabled-runtime" {
+				if contains(r.log, "systemctl enable watchpost-agent.service") {
+					t.Fatalf("enabled-runtime prior was converted to persistent enable: log=%v", r.log)
+				}
+			}
+			if tc.enabled == "disabled" {
+				if contains(r.log, "systemctl enable watchpost-agent.service") || contains(r.log, "systemctl enable --runtime watchpost-agent.service") {
+					t.Fatalf("disabled prior was enabled by reinstall: log=%v", r.log)
+				}
+			}
+			if tc.wantActive == "restart" && !contains(r.log, "systemctl restart watchpost-agent.service") {
+				t.Fatalf("active prior not restarted on successful reinstall: log=%v", r.log)
+			}
+			if tc.wantActive == "stop" && !contains(r.log, "systemctl stop watchpost-agent.service") {
+				t.Fatalf("inactive prior not stopped on successful reinstall: log=%v", r.log)
+			}
+		})
 	}
 }
 

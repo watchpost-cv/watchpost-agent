@@ -207,17 +207,31 @@ func validateEnvFile(path string) error {
 }
 
 // prepareDataDir safely establishes the service data directory. A newly
-// created leaf directory is created and assigned to the service account. An
+// created LEAF directory is created (only if its parent already exists as a
+// real, non-symlink directory) and assigned to the service account. An
 // existing directory is only reused if it is a non-symlink directory already
 // owned by the service account with no group/world-write bits; an unrelated
 // or root-owned existing directory is refused rather than silently adopted.
+// Parent directories are never created or adopted by the installer.
 func prepareDataDir(path string) error {
-	info, err := os.Lstat(path)
+	clean := filepath.Clean(path)
+	info, err := os.Lstat(clean)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(path, 0700); err != nil {
+		parent := filepath.Dir(clean)
+		pinfo, e := os.Lstat(parent)
+		if e != nil {
+			return fmt.Errorf("data directory parent %q does not exist; create the parent hierarchy and retry (the installer creates only the final data-directory leaf)", parent)
+		}
+		if pinfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("data directory parent %q must not be a symlink", parent)
+		}
+		if !pinfo.IsDir() {
+			return fmt.Errorf("data directory parent %q is not a directory", parent)
+		}
+		if err := mkdirData(clean, 0700); err != nil {
 			return fmt.Errorf("cannot create data directory %q: %w", path, err)
 		}
-		if err := chownData(path); err != nil {
+		if err := chownData(clean); err != nil {
 			return err
 		}
 		return nil
@@ -733,17 +747,21 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 	if e := copyFile(source, paths.Binary, 0o755); e != nil {
 		return e
 	}
-	changed := unitChanged || binaryChanged
-	steps := [][]string{{"daemon-reload"}}
-	if changed {
+	// Forward path: a fresh install establishes the machine-service default
+	// (enabled + active). An EXISTING managed installation must preserve its
+	// exact prior enablement and activity states through the same canonical
+	// restoration helpers used by failed-install rollback, so a changed
+	// binary/unit can never silently convert a disabled+inactive service into
+	// enabled+active or a runtime-only enablement into a persistent one.
+	steps := [][]string{}
+	if unitChanged {
+		steps = append(steps, []string{"daemon-reload"})
+	}
+	if !hasUnit {
 		steps = append(steps, []string{"enable", "watchpost-agent.service"}, []string{"restart", "watchpost-agent.service"})
 	} else {
-		if priorEnabled != "enabled" {
-			steps = append(steps, []string{"enable", "watchpost-agent.service"})
-		}
-		if priorActive != "active" {
-			steps = append(steps, []string{"start", "watchpost-agent.service"})
-		}
+		steps = append(steps, enableRestoreSteps(priorEnabled, "watchpost-agent.service")...)
+		steps = append(steps, activeRestoreArgs(priorActive, "watchpost-agent.service"))
 	}
 	for _, a := range steps {
 		if err := m.systemctlSuccess(paths, a...); err != nil {
@@ -1186,21 +1204,36 @@ var serviceUID = func() (int, error) {
 	return uid, e
 }
 
-// systemDataRoots are filesystem and system-prefix directories the service
-// installer must never adopt as a data directory.
-var systemDataRoots = map[string]bool{
+// topLevelSystemRoots are filesystem roots that can never be a service data
+// directory even as a direct target (e.g. `--data /var`).
+var topLevelSystemRoots = map[string]bool{
 	"/": true, "/bin": true, "/boot": true, "/dev": true, "/etc": true,
 	"/home": true, "/lib": true, "/lib64": true, "/opt": true, "/proc": true,
 	"/root": true, "/run": true, "/sbin": true, "/srv": true, "/sys": true,
 	"/tmp": true, "/usr": true, "/var": true,
 }
 
+// protectedSystemTrees are system trees beneath which arbitrary application
+// data does not belong. /var and /srv are intentionally NOT in this set so
+// canonical /var/lib/<project> and /srv/<project> locations remain valid.
+var protectedSystemTrees = map[string]bool{
+	"/bin": true, "/boot": true, "/dev": true, "/etc": true, "/lib": true,
+	"/lib64": true, "/proc": true, "/root": true, "/run": true, "/sbin": true,
+	"/sys": true, "/usr": true,
+}
+
 // validateDataDirPath rejects data-directory paths that are dangerous system
-// roots. It must run before any ownership or mode mutation.
+// roots or live beneath protected system trees. It must run before any
+// ownership or mode mutation.
 func validateDataDirPath(path string) error {
 	clean := filepath.Clean(path)
-	if systemDataRoots[clean] {
+	if topLevelSystemRoots[clean] {
 		return fmt.Errorf("data directory %q is a system directory and cannot be adopted as a service data directory", path)
+	}
+	for p := clean; p != "/"; p = filepath.Dir(p) {
+		if protectedSystemTrees[p] {
+			return fmt.Errorf("data directory %q lives beneath protected system tree %q and cannot be used as a service data directory", path, p)
+		}
 	}
 	return nil
 }
