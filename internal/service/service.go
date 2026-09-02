@@ -49,11 +49,14 @@ type Paths struct {
 	System  bool
 }
 
+// DefaultDataDir is the canonical data directory the installed service owns.
+const DefaultDataDir = "/var/lib/watchpost-agent"
+
 // DefaultPaths returns the canonical machine-service paths.
 func DefaultPaths() Paths {
 	return Paths{
 		Binary:  "/usr/local/bin/watchpost-agent",
-		DataDir: "/var/lib/watchpost-agent",
+		DataDir: DefaultDataDir,
 		Unit:    "/etc/systemd/system/watchpost-agent.service",
 		System:  true,
 	}
@@ -206,106 +209,53 @@ func validateEnvFile(path string) error {
 	return nil
 }
 
-// dataDirState is the result of a non-mutating data-directory preflight.
-type dataDirState int
+// dataDirStatus classifies the outcome of the non-mutating data-path
+// inspection so the installer can defer every filesystem mutation until after
+// all preflight succeeds.
+type dataDirStatus int
 
 const (
-	dataUnsafe            dataDirState = iota // refused; caller must not proceed
-	dataMissingSafeParent                     // leaf absent; parent exists, real, non-symlink
-	dataPresentSafe                           // leaf exists and is service-owned
+	// dataDirAcceptFresh means the final leaf is missing but its parent already
+	// exists and was safely opened; the leaf may be created during the mutation
+	// phase, relative to the retained parent descriptor.
+	dataDirAcceptFresh dataDirStatus = iota
+	// dataDirAcceptExisting means the leaf already exists and is a safe,
+	// service-owned directory.
+	dataDirAcceptExisting
 )
 
-// chmodPath is a test seam for mode establishment.
-var chmodPath = func(path string, mode os.FileMode) error { return os.Chmod(path, mode) }
+// dataLeafInfo carries the leaf stat fields the installer needs, kept
+// cross-platform so the descriptor-relative primitives can be declared and
+// stubbed on every build target.
+type dataLeafInfo struct {
+	isDir     bool
+	isSymlink bool
+	mode      os.FileMode
+	uid       int
+}
 
-// validateAncestorChain refuses any existing ancestor of the data-directory
-// leaf that is a symlink, so a lexical path cannot resolve through an ancestor
-// symlink into a protected location. It is non-mutating.
-func validateAncestorChain(leaf string) error {
-	for p := filepath.Dir(leaf); ; p = filepath.Dir(p) {
-		info, e := os.Lstat(p)
-		if e != nil {
-			if errors.Is(e, os.ErrNotExist) {
-				return nil
-			}
-			return fmt.Errorf("cannot inspect data directory ancestor %q: %w", p, e)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("data directory ancestor %q is a symlink; refusing to create or adopt a leaf through it", p)
-		}
-		if p == "/" {
-			return nil
-		}
+// dataDirPlan is the result of the non-mutating inspection. It retains the
+// validated parent directory descriptor so the mutation phase is bound to the
+// exact directory inspected, never re-walked by pathname.
+type dataDirPlan struct {
+	status   dataDirStatus
+	parentFd int
+	leafName string
+	path     string
+}
+
+// close releases the retained parent descriptor (idempotent).
+func (p *dataDirPlan) close() {
+	if p.parentFd >= 0 {
+		closeFdSeam(p.parentFd)
+		p.parentFd = -1
 	}
 }
 
-// inspectDataDir performs the non-mutating data-directory preflight.
-func inspectDataDir(path string) (dataDirState, error) {
-	clean := filepath.Clean(path)
-	if e := validateAncestorChain(clean); e != nil {
-		return dataUnsafe, e
-	}
-	info, e := os.Lstat(clean)
-	if errors.Is(e, os.ErrNotExist) {
-		parent := filepath.Dir(clean)
-		pinfo, e := os.Lstat(parent)
-		if e != nil {
-			return dataUnsafe, fmt.Errorf("data directory parent %q does not exist; create the parent hierarchy and retry (the installer creates only the final data-directory leaf)", parent)
-		}
-		if pinfo.Mode()&os.ModeSymlink != 0 {
-			return dataUnsafe, fmt.Errorf("data directory parent %q must not be a symlink", parent)
-		}
-		if !pinfo.IsDir() {
-			return dataUnsafe, fmt.Errorf("data directory parent %q is not a directory", parent)
-		}
-		return dataMissingSafeParent, nil
-	}
-	if e != nil {
-		return dataUnsafe, fmt.Errorf("data directory %q: %w", path, e)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return dataUnsafe, fmt.Errorf("data directory %q must not be a symlink", path)
-	}
-	if !info.IsDir() {
-		return dataUnsafe, fmt.Errorf("data directory %q is not a directory", path)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return dataUnsafe, fmt.Errorf("data directory %q must not be group- or world-writable", path)
-	}
-	if e := requireServiceOwned(path); e != nil {
-		return dataUnsafe, e
-	}
-	return dataPresentSafe, nil
-}
-
-// establishDataDir mutatingly establishes the data directory leaf after a
-// successful non-mutating preflight. A chmod/chown failure on a freshly created
-// leaf removes the partial leaf and surfaces the error.
-func establishDataDir(path string) error {
-	clean := filepath.Clean(path)
-	_, e := os.Lstat(clean)
-	if errors.Is(e, os.ErrNotExist) {
-		if e := mkdirData(clean, 0700); e != nil {
-			return fmt.Errorf("cannot create data directory %q: %w", path, e)
-		}
-		if e := chmodPath(clean, 0700); e != nil {
-			_ = os.Remove(clean)
-			return fmt.Errorf("set data directory mode 0700: %w", e)
-		}
-		if e := chownData(clean); e != nil {
-			_ = os.Remove(clean)
-			return fmt.Errorf("assign data directory to the service account: %w", e)
-		}
-		return nil
-	}
-	if e != nil {
-		return fmt.Errorf("data directory %q: %w", path, e)
-	}
-	if e := chmodPath(clean, 0700); e != nil {
-		return fmt.Errorf("set existing data directory mode 0700: %w", e)
-	}
-	return nil
-}
+// inspectDataDir and establishDataDir are implemented on Linux using a
+// descriptor-relative, no-symlink walk of the parent chain (see datadir_linux.go)
+// so the validated parent is the exact directory mutated; non-Linux stubs fail
+// (Install is Linux-gated).
 
 // validateReadWritePath validates a data directory for ReadWritePaths=.
 func validateReadWritePath(path string) error {
@@ -650,10 +600,6 @@ func ensureServiceAccount() error {
 // ensureAccount is a test seam for service-account creation.
 var ensureAccount = func() error { return ensureServiceAccount() }
 
-// mkdirData and chownData are test seams for data-directory setup.
-var mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
-var chownData = func(path string) error { return chownAgent(path) }
-
 // Install publishes a new unit and binary as a failure-atomic transaction. A
 // partial failure restores the prior unit, enablement, active state and binary,
 // and the returned error combines the original failure with any rollback
@@ -683,11 +629,6 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 	}
 	if _, e := exec.LookPath("systemctl"); e != nil {
 		return errors.New("systemctl not found; is systemd installed?")
-	}
-	// Inspect the requested data path WITHOUT mutation.
-	dataState, e := inspectDataDir(paths.DataDir)
-	if e != nil {
-		return e
 	}
 	// Read and authenticate the existing managed unit (non-mutating).
 	unit := Unit(paths, listen, envfile)
@@ -727,22 +668,36 @@ func (m Manager) Install(source string, paths Paths, listen, envfile string) (re
 	}
 	binaryChanged := !hasBinary || incomingDigest != priorDigest
 	unitChanged := !hasUnit || string(oldUnit) != unit
-	// Genuine no-op decision is prerequisite-aware. An unchanged existing
-	// installation preserves its prior state (never silently enabled+started),
-	// and a safely missing leaf is repaired rather than claimed correct.
-	preserved := hasUnit && !unitChanged && !binaryChanged && priorEnabled == "enabled" && priorActive == "active"
-	if preserved && dataState == dataPresentSafe {
+	// Non-mutating data-path inspection: classify the requested directory
+	// (acceptable fresh leaf with a safe existing parent, or acceptable existing
+	// service-owned leaf) or refuse it. This runs before the genuine-no-op
+	// return so a reinstall never claims "already correct" while a recorded
+	// runtime prerequisite (the data directory) is missing or unsafe, and it
+	// runs before any account/data mutation so an unacceptable existing
+	// directory cannot trigger account creation first.
+	dataPlan, dErr := inspectDataDir(paths.DataDir)
+	if dErr != nil {
+		return fmt.Errorf("refusing to install the service: %w", dErr)
+	}
+	defer dataPlan.close()
+	// Genuine no-op: the installed unit and executable already match the request
+	// AND the recorded data directory already exists as a safe service-owned
+	// leaf, so the service is already running the requested version in its prior
+	// state; nothing is rewritten, reloaded, enabled or started.
+	if hasUnit && string(oldUnit) == unit && !binaryChanged && dataPlan.status == dataDirAcceptExisting {
 		return nil
 	}
-	repairDataOnly := preserved && dataState == dataMissingSafeParent
 	// ---- Mutation phase begins here ----
 	if e := ensureAccount(); e != nil {
 		return e
 	}
-	if e := establishDataDir(paths.DataDir); e != nil {
+	if e := establishDataDir(&dataPlan); e != nil {
 		return e
 	}
-	if repairDataOnly {
+	// Repair-only: the unit and binary already match the request, so the only
+	// reason the no-op check did not return early was a missing data leaf, which
+	// has just been recreated. No systemd state change is needed.
+	if hasUnit && string(oldUnit) == unit && !binaryChanged {
 		return nil
 	}
 	if hasBinary {
@@ -1233,14 +1188,6 @@ func activeRestoreArgs(word, unit string) []string {
 	return []string{"stop", unit}
 }
 
-func chownAgent(path string) error {
-	uid, gid, e := lookupServiceIDs()
-	if e != nil {
-		return e
-	}
-	return os.Chown(path, uid, gid)
-}
-
 func lookupServiceIDs() (int, int, error) {
 	u, e := user.Lookup(ServiceUser)
 	if e != nil {
@@ -1292,27 +1239,6 @@ func validateDataDirPath(path string) error {
 		if protectedSystemTrees[p] {
 			return fmt.Errorf("data directory %q lives beneath protected system tree %q and cannot be used as a service data directory", path, p)
 		}
-	}
-	return nil
-}
-
-// requireServiceOwned validates that an existing data directory is already
-// owned by the service account, so the installer never silently adopts an
-// unrelated directory. It is a variable so tests can simulate ownership.
-var requireServiceOwned = func(path string) error { return requireServiceOwnedReal(path) }
-
-func requireServiceOwnedReal(path string) error {
-	info, e := os.Lstat(path)
-	if e != nil {
-		return e
-	}
-	uid, e := serviceUID()
-	if e != nil {
-		return e
-	}
-	owner := fileUID(info)
-	if owner != uid {
-		return fmt.Errorf("data directory %q already exists and is owned by UID %d; the %s service requires it to be owned by %s:%s with mode 0700. Move existing data under %s or re-home it; the installer will not adopt an existing directory", path, owner, ServiceUser, ServiceUser, ServiceGroup, "/var/lib/watchpost-agent")
 	}
 	return nil
 }

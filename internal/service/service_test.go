@@ -64,22 +64,38 @@ func (f *fakeRunner) Stream(name string, args ...string) (int, error) {
 }
 
 // fakeManager returns a Manager wired to the fake runner with canonical
-// machine-service paths redirected to a temp directory.
+// machine-service paths redirected to a temp directory. The descriptor-relative
+// data-dir seams default to a simulated successful fresh-leaf establishment;
+// tests needing real filesystem behavior override them (see useRealDataDirSeams).
 func fakeManager(t *testing.T) (Manager, *fakeRunner, Paths) {
 	t.Helper()
-	oldAccount, oldMkdir, oldChown := ensureAccount, mkdirData, chownData
-	oldUID, oldOwned := serviceUID, requireServiceOwned
-	oldChmod := chmodPath
+	oldAccount := ensureAccount
+	oldUID := serviceUID
+	oldOpenParent, oldConsistent := openDataParentSeam, dataParentConsistentSeam
+	oldStatLeaf, oldMkdirAt := statDataLeafSeam, mkdirAtLeafSeam
+	oldOpenAt, oldChmod, oldChown := openAtLeafSeam, fchmodLeafSeam, fchownLeafSeam
+	oldFstat, oldUnlink, oldClose := fstatLeafSeam, unlinkAtSeam, closeFdSeam
 	ensureAccount = func() error { return nil }
-	mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
-	chownData = func(path string) error { return nil }
-	chmodPath = func(string, os.FileMode) error { return nil }
 	serviceUID = func() (int, error) { return 4242, nil }
-	requireServiceOwned = func(string) error { return nil }
+	openDataParentSeam = func(string) (int, error) { return 1, nil }
+	dataParentConsistentSeam = func(int, string) bool { return true }
+	statDataLeafSeam = func(int, string) (dataLeafInfo, error) { return dataLeafInfo{}, os.ErrNotExist }
+	mkdirAtLeafSeam = func(int, string) error { return nil }
+	openAtLeafSeam = func(int, string) (int, error) { return 2, nil }
+	fchmodLeafSeam = func(int) error { return nil }
+	fchownLeafSeam = func(int) error { return nil }
+	fstatLeafSeam = func(int) (dataLeafInfo, error) {
+		return dataLeafInfo{isDir: true, mode: 0o700, uid: 4242}, nil
+	}
+	unlinkAtSeam = func(int, string) error { return nil }
+	closeFdSeam = func(int) error { return nil }
 	t.Cleanup(func() {
-		ensureAccount, mkdirData, chownData = oldAccount, oldMkdir, oldChown
-		serviceUID, requireServiceOwned = oldUID, oldOwned
-		chmodPath = oldChmod
+		ensureAccount = oldAccount
+		serviceUID = oldUID
+		openDataParentSeam, dataParentConsistentSeam = oldOpenParent, oldConsistent
+		statDataLeafSeam, mkdirAtLeafSeam = oldStatLeaf, oldMkdirAt
+		openAtLeafSeam, fchmodLeafSeam, fchownLeafSeam = oldOpenAt, oldChmod, oldChown
+		fstatLeafSeam, unlinkAtSeam, closeFdSeam = oldFstat, oldUnlink, oldClose
 	})
 	dir := t.TempDir()
 	paths := Paths{
@@ -92,6 +108,39 @@ func fakeManager(t *testing.T) (Manager, *fakeRunner, Paths) {
 	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}}
 	m := Manager{Run: r.Run, Stream: r.Stream}
 	return m, r, paths
+}
+
+// useRealDataDirSeams switches the descriptor-relative data-dir seams to their
+// real syscall implementations so a test exercises the actual filesystem
+// establishment.
+func useRealDataDirSeams(t *testing.T) {
+	t.Helper()
+	openDataParentSeam = openDataParentReal
+	dataParentConsistentSeam = dataParentConsistentReal
+	statDataLeafSeam = statDataLeafReal
+	mkdirAtLeafSeam = mkdirAtLeafReal
+	openAtLeafSeam = openAtLeafReal
+	fchmodLeafSeam = fchmodLeafReal
+	fchownLeafSeam = func(fd int) error { return nil } // tests run unprivileged; ownership is simulated
+	fstatLeafSeam = fstatLeafReal
+	unlinkAtSeam = unlinkAtLeafReal
+	closeFdSeam = closeFdReal
+}
+
+// hasMutatingSystemctl reports whether the fake runner issued a mutating
+// lifecycle verb (enable/disable/start/stop/restart/daemon-reload).
+func hasMutatingSystemctl(log []string) bool {
+	for _, call := range log {
+		for _, prefix := range []string{
+			"systemctl enable ", "systemctl disable ", "systemctl start ",
+			"systemctl restart ", "systemctl stop ", "systemctl daemon-reload",
+		} {
+			if strings.HasPrefix(call, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fakeStrictManager returns a manager whose fake runner fails on any
