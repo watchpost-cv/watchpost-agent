@@ -24,6 +24,10 @@ type fakeRunner struct {
 	log    []string
 	calls  map[string]int
 	seq    map[string][]fakeResult
+	// strict makes any unconfigured systemctl/journalctl invocation fail with
+	// a nonzero exit so an unexpected lifecycle call can never be hidden by a
+	// permissive default success.
+	strict bool
 }
 
 func (f *fakeRunner) Run(name string, args ...string) (string, int, error) {
@@ -41,6 +45,9 @@ func (f *fakeRunner) Run(name string, args ...string) (string, int, error) {
 	if r, ok := f.script[key]; ok {
 		return r.out, r.code, r.err
 	}
+	if f.strict {
+		return "", 1, fmt.Errorf("unexpected command: %s", key)
+	}
 	return "", 0, nil
 }
 
@@ -50,6 +57,9 @@ func (f *fakeRunner) Stream(name string, args ...string) (int, error) {
 	if r, ok := f.script[key]; ok {
 		return r.code, r.err
 	}
+	if f.strict {
+		return 1, fmt.Errorf("unexpected command: %s", key)
+	}
 	return 0, nil
 }
 
@@ -58,10 +68,16 @@ func (f *fakeRunner) Stream(name string, args ...string) (int, error) {
 func fakeManager(t *testing.T) (Manager, *fakeRunner, Paths) {
 	t.Helper()
 	oldAccount, oldMkdir, oldChown := ensureAccount, mkdirData, chownData
+	oldUID, oldOwned := serviceUID, requireServiceOwned
 	ensureAccount = func() error { return nil }
 	mkdirData = func(path string, mode os.FileMode) error { return os.MkdirAll(path, mode) }
 	chownData = func(path string) error { return nil }
-	t.Cleanup(func() { ensureAccount, mkdirData, chownData = oldAccount, oldMkdir, oldChown })
+	serviceUID = func() (int, error) { return 4242, nil }
+	requireServiceOwned = func(string) error { return nil }
+	t.Cleanup(func() {
+		ensureAccount, mkdirData, chownData = oldAccount, oldMkdir, oldChown
+		serviceUID, requireServiceOwned = oldUID, oldOwned
+	})
 	dir := t.TempDir()
 	paths := Paths{
 		Binary:  filepath.Join(dir, "watchpost-agent"),
@@ -72,6 +88,15 @@ func fakeManager(t *testing.T) (Manager, *fakeRunner, Paths) {
 	os.WriteFile(paths.Binary, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}}
 	m := Manager{Run: r.Run, Stream: r.Stream}
+	return m, r, paths
+}
+
+// fakeStrictManager returns a manager whose fake runner fails on any
+// unconfigured systemd invocation.
+func fakeStrictManager(t *testing.T) (Manager, *fakeRunner, Paths) {
+	t.Helper()
+	m, r, paths := fakeManager(t)
+	r.strict = true
 	return m, r, paths
 }
 
