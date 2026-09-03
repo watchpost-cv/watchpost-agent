@@ -109,6 +109,7 @@ func fakeManager(t *testing.T) (Manager, *fakeRunner, Paths) {
 	}
 	os.WriteFile(paths.Binary, []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	r := &fakeRunner{script: map[string]fakeResult{}, seq: map[string][]fakeResult{}}
+	r.script["systemctl reset-failed watchpost-agent.service"] = fakeResult{}
 	m := Manager{Run: r.Run, Stream: r.Stream}
 	return m, r, paths
 }

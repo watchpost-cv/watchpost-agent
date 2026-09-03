@@ -300,3 +300,18 @@ func TestRunServiceInstallRejectsFlagsForNonInstallCommands(t *testing.T) {
 		t.Fatalf("logs resolved listener flags: %q", out)
 	}
 }
+
+func TestServiceLifecycleSuccessGrammar(t *testing.T) {
+	want := map[string]string{
+		"start": "watchpost-agent.service started.",
+		"stop": "watchpost-agent.service stopped.",
+		"restart": "watchpost-agent.service restarted.",
+		"enable": "watchpost-agent.service enabled.",
+		"disable": "watchpost-agent.service disabled.",
+	}
+	for verb, expected := range want {
+		if got := serviceLifecycleSuccess(verb); got != expected {
+			t.Fatalf("%s message = %q, want %q", verb, got, expected)
+		}
+	}
+}

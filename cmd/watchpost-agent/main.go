@@ -203,7 +203,7 @@ func runServiceCommand(args []string) int {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
 			return 1
 		}
-		fmt.Fprintln(os.Stdout, "watchpost-agent.service installed and active.")
+		fmt.Fprintln(os.Stdout, "watchpost-agent.service installed.")
 		return 0
 	case "uninstall":
 		if len(positional) != 0 {
@@ -224,7 +224,7 @@ func runServiceCommand(args []string) int {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
 			return 1
 		}
-		fmt.Fprintln(os.Stdout, "watchpost-agent.service "+cmd+"ed.")
+		fmt.Fprintln(os.Stdout, serviceLifecycleSuccess(cmd))
 		return 0
 	case "status":
 		if len(positional) != 0 {
@@ -256,7 +256,7 @@ func runServiceCommand(args []string) int {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service update:", err)
 			return 1
 		}
-		fmt.Fprintln(os.Stdout, "watchpost-agent.service updated and restarted.")
+		fmt.Fprintln(os.Stdout, "watchpost-agent.service updated.")
 		return 0
 	case "rollback":
 		if len(positional) != 0 {
@@ -267,12 +267,20 @@ func runServiceCommand(args []string) int {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service rollback:", err)
 			return 1
 		}
-		fmt.Fprintln(os.Stdout, "watchpost-agent.service rolled back and restarted.")
+		fmt.Fprintln(os.Stdout, "watchpost-agent.service rolled back.")
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "watchpost-agent: unknown service command %q\n\nUsage: watchpost-agent service <install|uninstall|start|stop|restart|status|enable|disable|logs|update|rollback> [flags]\n", cmd)
 		return 2
 	}
+}
+
+func serviceLifecycleSuccess(verb string) string {
+	words := map[string]string{
+		"start": "started", "stop": "stopped", "restart": "restarted",
+		"enable": "enabled", "disable": "disabled",
+	}
+	return "watchpost-agent.service " + words[verb] + "."
 }
 
 // installOptions builds the service.Options recorded in a newly installed unit

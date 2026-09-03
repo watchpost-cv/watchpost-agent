@@ -168,6 +168,17 @@ func (m Manager) systemctlSuccess(paths Paths, args ...string) error {
 	return nil
 }
 
+func (m Manager) resetFailed(paths Paths) error {
+	out, code, err := m.systemctl(paths, "reset-failed", "watchpost-agent.service")
+	if err != nil {
+		return fmt.Errorf("cannot run systemctl reset-failed watchpost-agent.service: %w", err)
+	}
+	if code == 0 || strings.Contains(strings.ToLower(out), "not loaded") {
+		return nil
+	}
+	return fmt.Errorf("systemctl reset-failed watchpost-agent.service exited %d: %s", code, bounded(strings.TrimSpace(out)))
+}
+
 // unitStateWord runs a state verb (is-enabled/is-active), tolerating a nonzero
 // exit for legitimate negative answers and returning the trimmed word.
 func (m Manager) unitStateWord(paths Paths, verb string) (string, error) {
@@ -342,7 +353,9 @@ func renderUnitBody(paths Paths, opts Options) string {
 	b.WriteString("[Unit]\n")
 	b.WriteString("Description=Watchpost Agent\n")
 	b.WriteString("After=network-online.target\n")
-	b.WriteString("Wants=network-online.target\n\n")
+	b.WriteString("Wants=network-online.target\n")
+	b.WriteString("StartLimitIntervalSec=60\n")
+	b.WriteString("StartLimitBurst=5\n\n")
 	b.WriteString("[Service]\n")
 	b.WriteString("Type=simple\n")
 	b.WriteString("User=" + ServiceUser + "\n")
@@ -830,6 +843,11 @@ func (m Manager) InstallOptions(source string, paths Paths, o Options) (retErr e
 					break
 				}
 			}
+			if priorActive == "active" {
+				if e := m.resetFailed(paths); e != nil {
+					errs = append(errs, fmt.Sprintf("reset failed state: %v", e))
+				}
+			}
 			if e := m.systemctlSuccess(paths, activeRestoreArgs(priorActive, "watchpost-agent.service")...); e != nil {
 				errs = append(errs, fmt.Sprintf("restore active state %q: %v", priorActive, e))
 			}
@@ -867,6 +885,12 @@ func (m Manager) InstallOptions(source string, paths Paths, o Options) (retErr e
 		steps = append(steps, enableRestoreSteps(priorEnabled, "watchpost-agent.service")...)
 		steps = append(steps, activeRestoreArgs(priorActive, "watchpost-agent.service"))
 	}
+	if len(steps) > 0 {
+		last := steps[len(steps)-1]
+		if last[0] == "start" || last[0] == "restart" {
+			steps = append(steps[:len(steps)-1], []string{"reset-failed", "watchpost-agent.service"}, last)
+		}
+	}
 	for _, a := range steps {
 		if err := m.systemctlSuccess(paths, a...); err != nil {
 			retErr = fmt.Errorf("systemctl %s: %w (installation rolled back)", strings.Join(a, " "), err)
@@ -894,6 +918,11 @@ func (m Manager) Disable(paths Paths) error { return m.lifecycle(paths, "disable
 func (m Manager) lifecycle(paths Paths, verb string) error {
 	if err := m.requireManaged(paths, verb); err != nil {
 		return err
+	}
+	if verb == "start" || verb == "restart" {
+		if err := m.resetFailed(paths); err != nil {
+			return err
+		}
 	}
 	if err := m.systemctlSuccess(paths, verb, "watchpost-agent.service"); err != nil {
 		return err
@@ -1082,6 +1111,9 @@ func (m Manager) Update(artifact, want string, paths Paths) error {
 	if !wasActive {
 		return nil
 	}
+	if e := m.resetFailed(paths); e != nil {
+		return updateFailureWithRecovery(fmt.Errorf("reset failed state before update restart: %w", e), m.restoreAfterFailedUpdate(paths))
+	}
 	if out, code, err := m.systemctl(paths, "restart", "watchpost-agent.service"); err != nil || code != 0 {
 		updateErr := fmt.Errorf("restart after update: %s: %w", bounded(strings.TrimSpace(out)), errOrCode(err, code))
 		return updateFailureWithRecovery(updateErr, m.restoreAfterFailedUpdate(paths))
@@ -1146,6 +1178,9 @@ func (m Manager) restoreAfterFailedUpdate(paths Paths) error {
 		return fmt.Errorf("recovery: restore old binary: %w", e)
 	}
 	if priorActive == "active" {
+		if e := m.resetFailed(paths); e != nil {
+			return fmt.Errorf("recovery: reset failed state: %w", e)
+		}
 		if e := m.systemctlSuccess(paths, "restart", "watchpost-agent.service"); e != nil {
 			return fmt.Errorf("recovery: restart old service: %w", e)
 		}
@@ -1175,6 +1210,11 @@ func (m Manager) Rollback(paths Paths) error {
 		return fmt.Errorf("rollback: invalid prior-state marker %q", priorActive)
 	}
 	wasActive := priorActive == "active"
+	if wasActive {
+		if e := m.resetFailed(paths); e != nil {
+			return e
+		}
+	}
 	cur := paths.Binary + ".failed"
 	_ = os.Remove(cur)
 	if e := os.Rename(paths.Binary, cur); e != nil {
