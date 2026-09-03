@@ -1,5 +1,19 @@
 # Watchpost Agent
 
+Watchpost Agent collects bounded host evidence and delivers it to an approved Watchpost installation.
+
+## Command line
+
+```sh
+watchpost-agent version
+watchpost-agent --version
+watchpost-agent service status
+```
+
+Unknown commands and unsupported options fail with a non-zero exit status.
+Run the binary without a subcommand to start the integrated server, or use
+`watchpost-agent serve` where that compatibility alias is supported.
+
 Watchpost Agent is the separately installed machine-monitoring companion for
 Watchpost. It provides an embedded local website for normal setup and an
 equivalent CLI for headless servers, SSH, automation and recovery.

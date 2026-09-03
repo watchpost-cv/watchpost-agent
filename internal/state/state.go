@@ -35,6 +35,16 @@ type LocalAuth struct {
 	Accounts     []Account      `json:"accounts,omitempty"`
 	Audit        []AuditEntry   `json:"audit,omitempty"`
 	Bootstrap    BootstrapToken `json:"bootstrap_token,omitempty"`
+	Sessions     []AuthSession   `json:"sessions,omitempty"`
+}
+
+// AuthSession stores only a hash of the browser token. Sessions survive
+// service restarts without writing bearer credentials to disk.
+type AuthSession struct {
+	TokenHash string    `json:"token_hash"`
+	CSRF      string    `json:"csrf"`
+	ExpiresAt time.Time `json:"expires_at"`
+	UserID    string    `json:"user_id"`
 }
 
 // BootstrapToken gates first-administrator setup when agent management is
@@ -203,6 +213,7 @@ func (s *Store) cloneData() State {
 	next := src
 	next.LocalAuth.Accounts = append([]Account(nil), src.LocalAuth.Accounts...)
 	next.LocalAuth.Audit = append([]AuditEntry(nil), src.LocalAuth.Audit...)
+	next.LocalAuth.Sessions = append([]AuthSession(nil), src.LocalAuth.Sessions...)
 	next.Delivery.Queue = make([]json.RawMessage, len(src.Delivery.Queue))
 	for index, item := range src.Delivery.Queue {
 		copy := append([]byte(nil), item...)

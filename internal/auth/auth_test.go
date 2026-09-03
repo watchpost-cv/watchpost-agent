@@ -46,6 +46,22 @@ func TestSetupLoginAndSession(t *testing.T) {
 	}
 }
 
+func TestSessionSurvivesManagerRestart(t *testing.T) {
+	store := openStore(t)
+	manager := New(store)
+	if err := manager.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	session, err := manager.Login("admin@local", "correct-horse-battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(store)
+	if got, ok := restarted.Authenticate(session.Token); !ok || got.User.Email != "admin@local" || got.CSRF != session.CSRF {
+		t.Fatalf("durable session not restored: %#v ok=%v", got, ok)
+	}
+}
+
 func TestRoleCapabilities(t *testing.T) {
 	store := openStore(t)
 	m := New(store)

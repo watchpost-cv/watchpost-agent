@@ -24,7 +24,7 @@ import (
 	"github.com/watchpost-ops/watchpost-agent/internal/telemetry"
 )
 
-var version = "dev"
+var version = "0.1.0"
 
 func main() {
 	// Service-management commands must remain usable even when the application
@@ -315,8 +315,15 @@ func lifecycleErr(m service.Manager, paths service.Paths, verb string) error {
 }
 
 func run(arguments []string) error {
+	if len(arguments) == 1 && arguments[0] == "version" {
+		fmt.Fprintln(os.Stdout, version)
+		return nil
+	}
 	if len(arguments) > 0 && (arguments[0] == "setup" || arguments[0] == "info" || arguments[0] == "pair" || arguments[0] == "pair-status" || arguments[0] == "configure" || arguments[0] == "rotate" || arguments[0] == "unpair" || arguments[0] == "reset") {
 		return localCommand(arguments[0], arguments[1:])
+	}
+	if len(arguments) > 0 && !strings.HasPrefix(arguments[0], "-") {
+		return fmt.Errorf("unknown command %s", arguments[0])
 	}
 	flags := flag.NewFlagSet("watchpost-agent", flag.ContinueOnError)
 	host := flags.String("host", "", "HTTP bind host (default 127.0.0.1; WATCHPOST_AGENT_HOST overrides, CLI wins)")

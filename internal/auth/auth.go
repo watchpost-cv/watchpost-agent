@@ -71,7 +71,18 @@ type Manager struct {
 }
 
 func New(store *state.Store) *Manager {
-	return &Manager{state: store, sessions: map[string]sessionRecord{}}
+	manager := &Manager{state: store, sessions: map[string]sessionRecord{}}
+	current := store.Snapshot()
+	accounts := map[string]Account{}
+	for _, account := range current.LocalAuth.Accounts {
+		accounts[account.ID] = Account{ID: account.ID, Email: account.Email, Role: account.Role}
+	}
+	for _, session := range current.LocalAuth.Sessions {
+		if user, ok := accounts[session.UserID]; ok && time.Now().Before(session.ExpiresAt) {
+			manager.sessions[session.TokenHash] = sessionRecord{CSRF: session.CSRF, Expires: session.ExpiresAt, User: user}
+		}
+	}
+	return manager
 }
 
 func (m *Manager) SetBootstrapTokenRequired(required bool) { m.bootstrapTokenRequired = required }
@@ -181,14 +192,18 @@ func (m *Manager) Login(email, password string) (Session, error) {
 			return Session{}, err
 		}
 		user := Account{ID: account.ID, Email: account.Email, Role: account.Role}
-		// Persist the login audit before handing out a session: a failed
-		// durable audit must not leave a usable session behind.
-		if err := m.persistAudit(account.Email, "login", "login"); err != nil {
-			return Session{}, err
+		expires := time.Now().Add(24 * time.Hour)
+		hash := tokenHash(sessionToken)
+		if err := m.state.Update(func(current *state.State) error {
+			current.LocalAuth.AppendAudit(account.Email, "login", "login")
+			current.LocalAuth.Sessions = append(current.LocalAuth.Sessions, state.AuthSession{TokenHash: hash, CSRF: csrf, ExpiresAt: expires, UserID: user.ID})
+			return nil
+		}); err != nil {
+			return Session{}, fmt.Errorf("%w: %v", ErrAuditPersistence, err)
 		}
 		m.mu.Lock()
 		m.failures = nil
-		m.sessions[sessionToken] = sessionRecord{CSRF: csrf, Expires: time.Now().Add(24 * time.Hour), User: user}
+		m.sessions[hash] = sessionRecord{CSRF: csrf, Expires: expires, User: user}
 		m.mu.Unlock()
 		return Session{Token: sessionToken, CSRF: csrf, User: user}, nil
 	}
@@ -201,47 +216,50 @@ func (m *Manager) Login(email, password string) (Session, error) {
 func (m *Manager) Authenticate(token string) (Session, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	record, ok := m.sessions[token]
+	hash := tokenHash(token)
+	record, ok := m.sessions[hash]
 	if !ok || time.Now().After(record.Expires) {
-		delete(m.sessions, token)
+		delete(m.sessions, hash)
+		_ = m.removeStoredSessions(func(session state.AuthSession) bool { return session.TokenHash == hash })
 		return Session{}, false
 	}
 	return Session{Token: token, CSRF: record.CSRF, User: record.User}, true
 }
 
-// Logout revokes a session. Sessions are ephemeral (in-memory) state, so the
-// logout audit row cannot share a state save with the deletion; instead the
-// attributed audit entry is persisted first, and the session is removed only
-// after that durable write succeeds. A failed audit leaves the session valid
-// and returns an error, and the caller must not report a successful logout.
+// Logout atomically records the audit event and removes the durable session.
 func (m *Manager) Logout(token string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	record, ok := m.sessions[token]
+	hash := tokenHash(token)
+	record, ok := m.sessions[hash]
 	if !ok {
 		// Nothing to revoke; a stale token is an idempotent no-op.
 		return nil
 	}
-	if err := m.persistAudit(record.User.Email, "logout", "logout"); err != nil {
-		return err
+	if err := m.state.Update(func(current *state.State) error {
+		current.LocalAuth.AppendAudit(record.User.Email, "logout", "logout")
+		current.LocalAuth.Sessions = filterSessions(current.LocalAuth.Sessions, func(session state.AuthSession) bool { return session.TokenHash == hash })
+		return nil
+	}); err != nil {
+		return fmt.Errorf("%w: %v", ErrAuditPersistence, err)
 	}
-	delete(m.sessions, token)
+	delete(m.sessions, hash)
 	return nil
 }
 
 func (m *Manager) ClearSessions() {
 	m.mu.Lock()
+	_ = m.state.Update(func(current *state.State) error {
+		current.LocalAuth.Sessions = nil
+		return nil
+	})
 	m.sessions = map[string]sessionRecord{}
 	m.failures = nil
 	m.mu.Unlock()
 }
 
-// RevokeUserSessions removes every session for a local account. Sessions are
-// ephemeral (in-memory) state, so the revocation audit row cannot share a
-// state save with the deletions; the attributed audit entry is persisted
-// first, and the targeted sessions are removed only after that durable write
-// succeeds. A failed audit leaves every targeted session valid and returns
-// the error, and the caller must not report successful revocation.
+// RevokeUserSessions atomically records the audit event and removes every
+// durable session for a local account.
 //
 // Lock ordering: the session lock is held while the audit state save runs
 // (session → state). No code path takes the state lock and then the session
@@ -255,8 +273,12 @@ func (m *Manager) RevokeUserSessions(actor, accountID string) (int, error) {
 			targets = append(targets, token)
 		}
 	}
-	if err := m.persistAudit(actor, "account_revoke_sessions", "account="+accountID); err != nil {
-		return 0, err
+	if err := m.state.Update(func(current *state.State) error {
+		current.LocalAuth.AppendAudit(actor, "account_revoke_sessions", "account="+accountID)
+		current.LocalAuth.Sessions = filterSessions(current.LocalAuth.Sessions, func(session state.AuthSession) bool { return session.UserID == accountID })
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrAuditPersistence, err)
 	}
 	for _, token := range targets {
 		delete(m.sessions, token)
@@ -271,7 +293,8 @@ func (m *Manager) ChangePassword(accountID, currentPassword, newPassword, keepTo
 		return errors.New("password must contain at least 7 characters")
 	}
 	var errOut error
-	m.state.Update(func(current *state.State) error {
+	keepHash := tokenHash(keepToken)
+	if err := m.state.Update(func(current *state.State) error {
 		for index, account := range current.LocalAuth.Accounts {
 			if account.ID != accountID {
 				continue
@@ -291,17 +314,22 @@ func (m *Manager) ChangePassword(accountID, currentPassword, newPassword, keepTo
 			current.LocalAuth.Accounts[index].Salt = salt
 			current.LocalAuth.Accounts[index].PasswordHash = hash
 			current.LocalAuth.AppendAudit(account.Email, "password_change", "password rotated")
+			current.LocalAuth.Sessions = filterSessions(current.LocalAuth.Sessions, func(session state.AuthSession) bool {
+				return session.UserID == accountID && session.TokenHash != keepHash
+			})
 			return nil
 		}
 		errOut = errors.New("account not found")
 		return errOut
-	})
+	}); err != nil {
+		return err
+	}
 	if errOut != nil {
 		return errOut
 	}
 	m.mu.Lock()
 	for token, record := range m.sessions {
-		if record.User.ID == accountID && token != keepToken {
+		if record.User.ID == accountID && token != keepHash {
 			delete(m.sessions, token)
 		}
 	}
@@ -368,6 +396,23 @@ func (m *Manager) persistAudit(actor, action, detail string) error {
 		return fmt.Errorf("%w: %v", ErrAuditPersistence, err)
 	}
 	return nil
+}
+
+func filterSessions(sessions []state.AuthSession, remove func(state.AuthSession) bool) []state.AuthSession {
+	kept := sessions[:0]
+	for _, session := range sessions {
+		if !remove(session) {
+			kept = append(kept, session)
+		}
+	}
+	return kept
+}
+
+func (m *Manager) removeStoredSessions(remove func(state.AuthSession) bool) error {
+	return m.state.Update(func(current *state.State) error {
+		current.LocalAuth.Sessions = filterSessions(current.LocalAuth.Sessions, remove)
+		return nil
+	})
 }
 
 func WithSession(ctx context.Context, session Session) context.Context {

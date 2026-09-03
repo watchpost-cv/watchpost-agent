@@ -1,4 +1,13 @@
 # HANDOVER.md
+
+## Frontend asset ownership
+
+Nift tracks and builds HTML pages only. CSS, JavaScript, images, icons and other
+static assets are canonical in the generated web root (`public/`, `web/dist/`
+or the repository's embedded-public directory). Edit those files directly.
+Do not recreate asset copies under `content/`, do not add asset entries to
+`.nift/tracked.json`, and do not let a Nift build overwrite them. After changing
+HTML templates or content, run Nift and verify that direct assets are unchanged.
 v0.0.5
 
 Project status: WP-A01–WP-A05 are complete. Watchpost Agent is a separate
