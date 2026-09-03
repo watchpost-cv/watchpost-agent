@@ -104,7 +104,13 @@ func (a *App) setup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	session, err := a.auth.Login(input.Email, input.Password)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "administrator created, but the initial session could not be established; sign in to continue"})
+		return
+	}
+	http.SetCookie(w, auth.Cookie(r, session, a.options.SecureCookies))
+	writeJSON(w, http.StatusCreated, map[string]any{"csrf_token": session.CSRF, "user": session.User})
 }
 
 func (a *App) login(w http.ResponseWriter, r *http.Request) {

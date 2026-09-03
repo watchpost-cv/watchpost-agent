@@ -30,19 +30,12 @@ func TestUnpairedStatusAndSecurityHeaders(t *testing.T) {
 	request.Host = "example.com"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent {
+	if response.Code != http.StatusCreated || len(response.Result().Cookies()) != 1 || !bytes.Contains(response.Body.Bytes(), []byte(`"csrf_token"`)) {
 		t.Fatalf("setup=%d %s", response.Code, response.Body.String())
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
-	request.Header.Set("Origin", "http://example.com")
-	request.Host = "example.com"
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
-		t.Fatalf("login=%d %s", response.Code, response.Body.String())
-	}
+	setupCookie := response.Result().Cookies()[0]
 	request = httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
-	request.AddCookie(response.Result().Cookies()[0])
+	request.AddCookie(setupCookie)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"pairing":"unpaired"`) {
@@ -82,7 +75,7 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	setup.Host = "example.com"
 	setupRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(setupRecorder, setup)
-	if setupRecorder.Code != http.StatusNoContent {
+	if setupRecorder.Code != http.StatusCreated {
 		t.Fatalf("setup=%d", setupRecorder.Code)
 	}
 	adminCookie, adminCSRF := loginForRole(t, handler, "admin@local", "admin-pass-1")
@@ -319,7 +312,7 @@ func TestRemoteSetupRequiresBootstrapToken(t *testing.T) {
 	withToken.Host = "example.com"
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, withToken)
-	if rec2.Code != http.StatusNoContent {
+	if rec2.Code != http.StatusCreated {
 		t.Fatalf("setup with token=%d %s", rec2.Code, rec2.Body.String())
 	}
 	// The token is never disclosed by status or bootstrap.
@@ -366,7 +359,7 @@ func TestLogoutEndpointReportsAuditFailure(t *testing.T) {
 	setupRequest.Host = "example.com"
 	setupResponse := httptest.NewRecorder()
 	handler.ServeHTTP(setupResponse, setupRequest)
-	if setupResponse.Code != http.StatusNoContent {
+	if setupResponse.Code != http.StatusCreated {
 		t.Fatalf("setup=%d", setupResponse.Code)
 	}
 	cookie, csrf := sessionFromLogin(t, handler)
@@ -407,7 +400,7 @@ func TestRevokeSessionsEndpointReportsAuditFailure(t *testing.T) {
 	setupRequest.Host = "example.com"
 	setupResponse := httptest.NewRecorder()
 	handler.ServeHTTP(setupResponse, setupRequest)
-	if setupResponse.Code != http.StatusNoContent {
+	if setupResponse.Code != http.StatusCreated {
 		t.Fatalf("setup=%d", setupResponse.Code)
 	}
 	cookie, csrf := sessionFromLogin(t, handler)
