@@ -1,16 +1,29 @@
 #!/bin/sh
-# action-pins.sh scans every workflow file under .github/workflows/ and rejects
-# any external action reference that is not pinned to a full immutable 40-hex
-# commit SHA:
-#   - mutable major-version tags (@v1, @v2, ...);
-#   - branch names (@main, @master, @release/*);
-#   - short or malformed SHAs;
-#   - action identities with no ref at all.
-# Local repository actions (`uses: ./path`) are exempt, as are step references
-# that are not `uses:` entries (the parser only inspects `uses:` values).
+# action-pins.sh scans every workflow file under .github/workflows/ (both *.yml
+# and *.yaml) and rejects any external `uses:` reference that is not pinned to a
+# full immutable 40-hex commit SHA.
 #
-# A comment (e.g. `# v4.2.2`) after the SHA is allowed and ignored. Only the
-# bare action identity + ref are validated.
+# It inspects every YAML mapping key named `uses`, whether it is:
+#   - a step-level action reference (`- uses: owner/action@ref`); or
+#   - a job-level reusable workflow reference
+#     (`uses: owner/repo/.github/workflows/wf.yml@ref`).
+#
+# Rules:
+#   - local repository actions (`uses: ./path`) are exempt;
+#   - every external `uses:` reference must end in exactly 40 hexadecimal
+#     characters;
+#   - indentation and optional YAML quoting are handled structurally;
+#   - comments never conceal or satisfy a reference;
+#   - `uses:` text inside a multiline `run: |` block scalar or a comment is
+#     never treated as an active reference;
+#   - the scan fails if no workflow files exist.
+#
+# A comment (e.g. `# v4.2.2`) after a reference is allowed and ignored.
+#
+# This uses a narrowly scoped YAML parser written in Python (available on the
+# GitHub-hosted runners that execute these scans) so no third-party YAML
+# dependency is required; block-scalar boundaries and quoting are handled
+# explicitly.
 #
 # Usage: scripts/action-pins.sh [workflow-dir]
 #   workflow-dir defaults to .github/workflows.
@@ -19,51 +32,140 @@ set -eu
 dir=${1:-.github/workflows}
 [ -d "$dir" ] || { echo "missing workflow directory $dir" >&2; exit 1; }
 
-fail=0
-found_any=0
-for wf in "$dir"/*.yml; do
-  [ -f "$wf" ] || continue
-  found_any=1
-  # Extract every `uses:` value, stripping an optional trailing ` # comment`.
-  # awk handles the pipeline naturally; the check itself is done in awk so a
-  # single pass validates the file.
-  awk -v file="$wf" '
-    function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-    {
-      content=$0
-      # Drop a trailing comment introduced by whitespace then hash.
-      i=index(content, " #")
-      if (i>0) content=substr(content,1,i-1)
-      content=trim(content)
-      if (content ~ /^-[ \t]*uses:[ \t]*[^ \t]+/) {
-        val=content
-        sub(/^-[ \t]*uses:[ \t]*/, "", val)
-        # Local repository actions are exempt.
-        if (val ~ /^\.\//) next
-        # Reject missing refs.
-        if (val !~ /@/) {
-          print file ": action has no ref: " content > "/dev/stderr"
-          bad=1; next
-        }
-        ref=val; sub(/^.*@/, "", ref)
-        # Reject anything that is not exactly 40 hex characters.
-        if (ref !~ /^[0-9a-fA-F]{40}$/) {
-          print file ": action ref is not a full 40-hex SHA: " content > "/dev/stderr"
-          bad=1
-        }
-      }
-    }
-    END { if (bad) exit 1 }
-  ' "$wf" || fail=1
-done
+python3 - "$dir" <<'PY'
+import os
+import re
+import sys
 
-if [ "$found_any" -eq 0 ]; then
-  echo "no workflow files found under $dir" >&2
-  exit 1
-fi
+workflow_dir = sys.argv[1]
 
-if [ "$fail" -ne 0 ]; then
-  echo "action-pins scan FAILED: mutable or unpinned action references present" >&2
-  exit 1
-fi
-echo "action-pins scan passed: every external action in $dir is pinned to a full commit SHA"
+
+def find_workflow_files(d):
+    """Return every *.yml / *.yaml file under d, sorted."""
+    files = []
+    for name in sorted(os.listdir(d)):
+        path = os.path.join(d, name)
+        if os.path.isfile(path) and (name.endswith(".yml") or name.endswith(".yaml")):
+            files.append(path)
+    return files
+
+
+def strip_comment(line):
+    """Strip a trailing YAML comment, respecting single/double quotes."""
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "'" and not in_double:
+            in_single = not in_single
+        elif c == '"' and not in_single:
+            in_double = not in_double
+        elif c == "#" and not in_single and not in_double and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+        i += 1
+    return line
+
+
+def unquote(s):
+    """Remove one layer of surrounding single or double quotes if present."""
+    s = s.strip()
+    if len(s) >= 2:
+        if (s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'"):
+            return s[1:-1]
+    return s
+
+
+def iter_uses_values(path):
+    """Yield every active `uses:` value (key or `- uses:`) outside block scalars
+    and comments. Structural: indentation tracks block-scalar scope so `uses:`
+    text inside a multiline `run: |` body is not treated as a reference."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+
+    # Block-scalar scope: while set, a line at greater indentation is literal
+    # body (ignored). The scope closes at the first line at or above the key's
+    # indentation (or EOF). Handles `key: |`, `key: >`, and their chomping
+    # variants (`|-`, `|+`, `>-`, `>+`, with an optional explicit indent digit).
+    block_indent = None
+    block_owner = None
+
+    for ln, raw in enumerate(lines, 1):
+        # Skip a pure blank line (also terminates a block scalar? No: blank lines
+        # inside a block scalar are body; handle by indentation rule below).
+        stripped = raw.strip()
+        if stripped == "":
+            if block_indent is not None:
+                # Blank lines inside a block scalar are still body and do not
+                # close it. They are only meaningful once a non-blank line at a
+                # lower indent appears, which the next non-blank iteration sees.
+                pass
+            continue
+
+        indent = len(raw) - len(raw.lstrip(" "))
+        content = raw[indent:]
+
+        if block_indent is not None:
+            if indent > block_indent:
+                # Literal block body: never a workflow key.
+                continue
+            block_indent = None
+            block_owner = None
+            # Fall through: this line is at/above the block key indentation and
+            # is a new YAML construct.
+
+        content = strip_comment(content).rstrip()
+        if content == "":
+            continue
+
+        # Match a mapping entry: optional sequence dash, then `key:`.
+        m = re.match(r"^(?:-\s+)?([A-Za-z0-9_.-]+)\s*:\s*(.*)$", content)
+        if not m:
+            continue
+        key, rest = m.group(1), m.group(2).strip()
+
+        if key == "uses":
+            yield unquote(rest), path, ln
+
+        # Detect the start of a block scalar on any key (e.g. `run: |`).
+        if re.search(r"[|>][+-]?[0-9]?$", rest):
+            block_indent = indent
+            block_owner = key
+
+
+def validate_ref(value, path, ln):
+    if value.startswith("./"):
+        return True  # local repository action, exempt
+    if "@" not in value:
+        sys.stderr.write(f"{path}:{ln}: action has no ref: {value}\n")
+        return False
+    ref = value.rsplit("@", 1)[1]
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", ref):
+        sys.stderr.write(
+            f"{path}:{ln}: action ref is not a full 40-hex SHA: {value}\n"
+        )
+        return False
+    return True
+
+
+files = find_workflow_files(workflow_dir)
+if not files:
+    sys.stderr.write(f"no workflow files found under {workflow_dir}\n")
+    sys.exit(1)
+
+bad = False
+for wf in files:
+    for value, path, ln in iter_uses_values(wf):
+        if not validate_ref(value, path, ln):
+            bad = True
+
+if bad:
+    sys.stderr.write(
+        "action-pins scan FAILED: mutable or unpinned action references present\n"
+    )
+    sys.exit(1)
+
+print(
+    f"action-pins scan passed: every external action in {workflow_dir} is pinned to a full commit SHA"
+)
+PY
