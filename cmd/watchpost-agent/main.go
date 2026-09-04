@@ -26,6 +26,14 @@ import (
 
 var version = "0.1.0"
 
+// newServiceManager and servicePaths are test seams. The production defaults
+// operate the real machine-service manager and canonical system paths; tests
+// override them so the service namespace dispatch can be exercised against a
+// fake runner and temporary paths without inspecting or mutating the host's
+// real watchpost-agent.service.
+var newServiceManager = func() service.Manager { return service.New() }
+var servicePaths = func() service.Paths { return service.DefaultPaths() }
+
 func main() {
 	// Service-management commands must remain usable even when the application
 	// configuration is unhealthy, so dispatch before any runtime config load.
@@ -108,7 +116,7 @@ func runServiceCommand(args []string) int {
 			return usage("no flags are accepted for " + cmd)
 		}
 	}
-	paths := service.DefaultPaths()
+	paths := servicePaths()
 	switch cmd {
 	case "install", "upgrade":
 		if len(positional) != 0 {
@@ -177,7 +185,7 @@ func runServiceCommand(args []string) int {
 				explicit = true
 			}
 		}
-		manager := service.New()
+		manager := newServiceManager()
 		var opts service.Options
 		if explicit {
 			opts, err = installOptions(addr, legacy, envfile)
@@ -209,7 +217,7 @@ func runServiceCommand(args []string) int {
 		if len(positional) != 0 {
 			return usage("uninstall takes no positional arguments")
 		}
-		manager := service.New()
+		manager := newServiceManager()
 		if err := manager.Uninstall(os.Stdout, paths); err != nil {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service uninstall:", err)
 			return 1
@@ -219,7 +227,7 @@ func runServiceCommand(args []string) int {
 		if len(positional) != 0 {
 			return usage(cmd + " takes no positional arguments")
 		}
-		manager := service.New()
+		manager := newServiceManager()
 		if err := lifecycleErr(manager, paths, cmd); err != nil {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service "+cmd+":", err)
 			return 1
@@ -230,7 +238,7 @@ func runServiceCommand(args []string) int {
 		if len(positional) != 0 {
 			return usage("status takes no positional arguments")
 		}
-		manager := service.New()
+		manager := newServiceManager()
 		if err := manager.Status(os.Stdout, paths, version); err != nil {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service status:", err)
 			return 1
@@ -240,7 +248,7 @@ func runServiceCommand(args []string) int {
 		if len(positional) != 0 {
 			return usage("logs takes no positional arguments")
 		}
-		manager := service.New()
+		manager := newServiceManager()
 		follow := len(flags) > 0 && flags[0] == "--follow"
 		if err := manager.Logs(follow, os.Stdout, paths); err != nil {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service logs:", err)
@@ -251,7 +259,7 @@ func runServiceCommand(args []string) int {
 		if len(positional) != 2 {
 			return usage("usage: watchpost-agent service update ARTIFACT SHA256")
 		}
-		manager := service.New()
+		manager := newServiceManager()
 		if err := manager.Update(positional[0], positional[1], paths); err != nil {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service update:", err)
 			return 1
@@ -262,7 +270,7 @@ func runServiceCommand(args []string) int {
 		if len(positional) != 0 {
 			return usage("rollback takes no positional arguments")
 		}
-		manager := service.New()
+		manager := newServiceManager()
 		if err := manager.Rollback(paths); err != nil {
 			fmt.Fprintln(os.Stderr, "watchpost-agent service rollback:", err)
 			return 1

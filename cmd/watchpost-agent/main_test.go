@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -29,6 +30,39 @@ func captureStderr(t *testing.T, f func() int) (string, int) {
 	os.Stderr = old
 	out, _ := io.ReadAll(r)
 	return string(out), code
+}
+
+// serviceFakeResult is a scripted command result for serviceFakeRunner.
+type serviceFakeResult struct {
+	out  string
+	code int
+	err  error
+}
+
+// serviceFakeRunner is a strict scripted runner: any unconfigured command fails
+// with a nonzero exit so an unexpected systemctl/journalctl call can never be
+// hidden. It records every invocation for assertions.
+type serviceFakeRunner struct {
+	script map[string]serviceFakeResult
+	log    []string
+}
+
+func (f *serviceFakeRunner) Run(name string, args ...string) (string, int, error) {
+	key := name + " " + strings.Join(args, " ")
+	f.log = append(f.log, key)
+	if r, ok := f.script[key]; ok {
+		return r.out, r.code, r.err
+	}
+	return "", 1, fmt.Errorf("unexpected command: %s", key)
+}
+
+func (f *serviceFakeRunner) Stream(name string, args ...string) (int, error) {
+	key := name + " " + strings.Join(args, " ")
+	f.log = append(f.log, key)
+	if r, ok := f.script[key]; ok {
+		return r.code, r.err
+	}
+	return 1, fmt.Errorf("unexpected command: %s", key)
 }
 
 func TestUnitMatchesForegroundConfig(t *testing.T) {
@@ -64,10 +98,39 @@ func TestServiceNamespaceDispatch(t *testing.T) {
 	// systemd (exit code 1, diagnostic on stderr). The top-level status alias is
 	// removed in the clean machine-service break; only the service namespace is
 	// canonical.
+	//
+	// This is made deterministic by injecting the service manager (a fake
+	// runner) and temporary paths, so the dispatch never inspects or mutates
+	// the host's real watchpost-agent.service regardless of whether it happens
+	// to be installed or running.
+	dir := t.TempDir()
+	paths := service.Paths{
+		Binary:  filepath.Join(dir, "watchpost-agent"),
+		DataDir: filepath.Join(dir, "data"),
+		Unit:    filepath.Join(dir, "watchpost-agent.service"),
+		System:  true,
+	}
+	r := &serviceFakeRunner{script: map[string]serviceFakeResult{}}
+	m := service.Manager{Run: r.Run, Stream: r.Stream}
+
+	oldManager, oldPaths := newServiceManager, servicePaths
+	newServiceManager = func() service.Manager { return m }
+	servicePaths = func() service.Paths { return paths }
+	t.Cleanup(func() { newServiceManager, servicePaths = oldManager, oldPaths })
+
 	for _, args := range [][]string{{"status"}, {"service", "status"}} {
 		var code int
 		if args[0] == "service" {
-			code = runServiceCommand(args[1:])
+			out, c := captureStderr(t, func() int { return runServiceCommand(args[1:]) })
+			code = c
+			// No unit file exists at the injected path, so status fails closed
+			// with a "not installed" diagnostic and never invokes systemctl.
+			if code == 0 {
+				t.Fatalf("%v unexpectedly succeeded (exit 0)", args)
+			}
+			if !strings.Contains(out, "not installed") {
+				t.Fatalf("%v output %q missing not-installed diagnostic", args, out)
+			}
 		} else {
 			// `watchpost-agent status` is not a service alias; it is treated as
 			// an unexpected argument and exits with a usage error (exit 1 path).
@@ -75,11 +138,10 @@ func TestServiceNamespaceDispatch(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%v unexpectedly succeeded", args)
 			}
-			continue
 		}
-		if code == 0 {
-			t.Fatalf("%v unexpectedly succeeded (exit 0)", args)
-		}
+	}
+	if len(r.log) != 0 {
+		t.Fatalf("service status dispatch invoked the systemctl runner (host mutation risk): %v", r.log)
 	}
 }
 
