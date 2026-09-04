@@ -368,3 +368,18 @@ Then read feature documentation only when the task requires it, for example:
 - integration with other application stacks.
 
 Prefer documented Nift behaviour and the existing project structure over guessing based on another website generator or framework.
+# Release procedure
+
+Watchpost Agent releases are independent from Watchpost server releases. Push a
+reviewed `vX.Y.Z` tag only after formatting, tests, race tests, vet, supported
+cross-builds, the real systemd lifecycle exercise, and a clean pushed tree pass.
+If the shared website's `agent-install.sh`, `agent-download.sh`, or
+`agent-update.sh` changed, deploy and fetch them from `https://watchpost.cv`
+before tagging.
+
+Use an RC for the first full rehearsal. Verify both supported Linux archives,
+`SHA256SUMS`, and GitHub provenance against the exact repository, workflow, tag
+and commit. On clean amd64 and arm64 Linux hosts exercise install, local setup,
+pairing, queued delivery, update, rollback, restart and uninstall. Publish the
+stable tag only after approval and rerun the public installer smoke. Never
+reuse a Watchpost server tag by assumption or replace assets in place.
