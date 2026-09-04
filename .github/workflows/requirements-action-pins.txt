@@ -1,0 +1,11 @@
+# Action-pin scanner runtime dependency.
+#
+# PyYAML is required by scripts/action-pins.sh (a genuine YAML parser). It is
+# provisioned explicitly with hash verification rather than relying on whatever
+# happens to be present in the hosted-runner image. The scanner fails closed if
+# this dependency is unavailable.
+#
+# Generated from the PyPI release metadata for PyYAML 6.0.3 (the manylinux
+# x86_64 CPython 3.12 wheel, matching the pinned actions/setup-python version
+# in the action-pins CI job). Upgrade deliberately and re-pin the hash.
+PyYAML==6.0.3 --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc

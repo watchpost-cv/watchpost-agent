@@ -3,10 +3,9 @@
 # and *.yaml) and rejects any external `uses:` reference that is not pinned to a
 # full immutable 40-hex commit SHA.
 #
-# It uses a genuine YAML parser (PyYAML, present on the GitHub-hosted Ubuntu
-# runners that execute these scans) and recursively walks the parsed document,
-# validating every mapping key whose DECODED value is exactly the string `uses`
-# — whether it appears as:
+# It uses a genuine YAML parser (PyYAML 6.0.3) and recursively walks the parsed
+# document, validating every mapping key whose DECODED value is exactly the
+# string `uses` — whether it appears as:
 #   - a step-level action reference (`- uses: owner/action@ref`);
 #   - a job-level reusable workflow reference
 #     (`uses: owner/repo/.github/workflows/wf.yml@ref`);
@@ -16,6 +15,12 @@
 # Decoding quoted and escaped keys is done by the YAML parser itself, so no
 # text-pattern enumeration is relied on as a security boundary.
 #
+# PyYAML is NOT assumed to be preinstalled. CI provisions it explicitly in the
+# dedicated action-pins job via actions/setup-python (pinned) and
+# `pip install --require-hashes -r .github/workflows/requirements-action-pins.txt`.
+# The scanner fails closed if PyYAML is unavailable, rather than risking a
+# mutable reference passing through an incomplete parser.
+#
 # Rules:
 #   - local repository actions (`uses: ./path`) are exempt;
 #   - every external `uses:` reference must end in exactly 40 hexadecimal
@@ -24,8 +29,7 @@
 #     and never produce a `uses:` mapping, so they cannot create false
 #     positives or conceal a reference;
 #   - the scan fails if no workflow files exist;
-#   - the scan FAILS CLOSED if PyYAML is unavailable, rather than risking a
-#     mutable reference passing through an incomplete parser.
+#   - the scan FAILS CLOSED if PyYAML is unavailable.
 #
 # A comment (e.g. `# v4.2.2`) after a reference is allowed and ignored.
 #

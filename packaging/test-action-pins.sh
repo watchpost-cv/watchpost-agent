@@ -5,6 +5,7 @@
 # never modifies the real workflow files; fixtures are built under mktemp.
 set -eu
 cd "$(dirname "$0")/.."
+ROOT="$PWD"
 
 V=packaging/action-pins.sh
 
@@ -326,5 +327,38 @@ if ! "$V" "$WF" >/dev/null 2>&1; then
   exit 1
 fi
 echo "ok: workflow with no uses accepted"
+
+# --- Dependency-provisioning assertion -------------------------------------
+# The scanner's YAML parser must be explicitly provisioned before it runs in
+# CI; it must never rely on a runner-image package. This asserts the dedicated
+# action-pins job pins setup-python, installs the requirements file with hash
+# verification, and only then runs the scanner.
+python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1]) as f:
+    doc = yaml.safe_load(f)
+
+jobs = doc.get("jobs", {})
+if "action-pins" not in jobs:
+    sys.exit("action-pins job missing from ci.yml")
+
+steps = jobs["action-pins"].get("steps", [])
+uses = [s.get("uses", "") for s in steps if "uses" in s]
+if not any(u.startswith("actions/setup-python@") and len(u.split("@")[1]) == 40 for u in uses):
+    sys.exit("action-pins job does not pin actions/setup-python to a full 40-hex SHA")
+
+runs = [s.get("run", "") for s in steps if "run" in s]
+install = [r for r in runs if "requirements-action-pins.txt" in r and "pip install" in r and "--require-hashes" in r]
+if not install:
+    sys.exit("action-pins job does not install the pinned requirements with --require-hashes")
+
+scanner_index = next((i for i, s in enumerate(steps) if s.get("run") and "action-pins.sh" in s.get("run")), None)
+install_index = next((i for i, s in enumerate(steps) if s.get("run") and "requirements-action-pins.txt" in s.get("run")), None)
+if scanner_index is None or install_index is None or install_index > scanner_index:
+    sys.exit("action-pins job runs the scanner before provisioning its dependency")
+PY
+echo "ok: parser dependency explicitly provisioned before the scanner in ci.yml"
 
 echo "action-pins negative and positive tests: PASS"
