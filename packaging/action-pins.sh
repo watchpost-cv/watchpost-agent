@@ -3,27 +3,31 @@
 # and *.yaml) and rejects any external `uses:` reference that is not pinned to a
 # full immutable 40-hex commit SHA.
 #
-# It inspects every YAML mapping key named `uses`, whether it is:
-#   - a step-level action reference (`- uses: owner/action@ref`); or
+# It uses a genuine YAML parser (PyYAML, present on the GitHub-hosted Ubuntu
+# runners that execute these scans) and recursively walks the parsed document,
+# validating every mapping key whose DECODED value is exactly the string `uses`
+# — whether it appears as:
+#   - a step-level action reference (`- uses: owner/action@ref`);
 #   - a job-level reusable workflow reference
-#     (`uses: owner/repo/.github/workflows/wf.yml@ref`).
+#     (`uses: owner/repo/.github/workflows/wf.yml@ref`);
+#   - a single-quoted, double-quoted, or escaped quoted key;
+#   - a flow-style mapping (`- { uses: owner/action@ref }`).
+#
+# Decoding quoted and escaped keys is done by the YAML parser itself, so no
+# text-pattern enumeration is relied on as a security boundary.
 #
 # Rules:
 #   - local repository actions (`uses: ./path`) are exempt;
 #   - every external `uses:` reference must end in exactly 40 hexadecimal
 #     characters;
-#   - indentation and optional YAML quoting are handled structurally;
-#   - comments never conceal or satisfy a reference;
-#   - `uses:` text inside a multiline `run: |` block scalar or a comment is
-#     never treated as an active reference;
-#   - the scan fails if no workflow files exist.
+#   - comments and multiline `run: |` block-scalar bodies are parsed by YAML
+#     and never produce a `uses:` mapping, so they cannot create false
+#     positives or conceal a reference;
+#   - the scan fails if no workflow files exist;
+#   - the scan FAILS CLOSED if PyYAML is unavailable, rather than risking a
+#     mutable reference passing through an incomplete parser.
 #
 # A comment (e.g. `# v4.2.2`) after a reference is allowed and ignored.
-#
-# This uses a narrowly scoped YAML parser written in Python (available on the
-# GitHub-hosted runners that execute these scans) so no third-party YAML
-# dependency is required; block-scalar boundaries and quoting are handled
-# explicitly.
 #
 # Usage: scripts/action-pins.sh [workflow-dir]
 #   workflow-dir defaults to .github/workflows.
@@ -39,6 +43,15 @@ import sys
 
 workflow_dir = sys.argv[1]
 
+try:
+    import yaml
+except Exception as e:  # pragma: no cover - environmental
+    sys.stderr.write(
+        "action-pins FAILED CLOSED: PyYAML is unavailable and a genuine YAML "
+        f"parser is required ({e})\n"
+    )
+    sys.exit(1)
+
 
 def find_workflow_files(d):
     """Return every *.yml / *.yaml file under d, sorted."""
@@ -50,102 +63,34 @@ def find_workflow_files(d):
     return files
 
 
-def strip_comment(line):
-    """Strip a trailing YAML comment, respecting single/double quotes."""
-    in_single = False
-    in_double = False
-    i = 0
-    while i < len(line):
-        c = line[i]
-        if c == "'" and not in_double:
-            in_single = not in_single
-        elif c == '"' and not in_single:
-            in_double = not in_double
-        elif c == "#" and not in_single and not in_double and (i == 0 or line[i - 1].isspace()):
-            return line[:i]
-        i += 1
-    return line
+def walk_and_validate(node, refs):
+    """Recursively inspect every mapping key whose decoded value is `uses` and
+    collect its reference value. Strings that appear only as values (e.g. block
+    scalars) are never keys and are not treated as references."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if isinstance(k, str) and k == "uses":
+                if isinstance(v, str):
+                    refs.append(v)
+                else:
+                    # A non-string `uses:` value is not a valid action reference.
+                    refs.append("")
+            else:
+                walk_and_validate(v, refs)
+    elif isinstance(node, list):
+        for item in node:
+            walk_and_validate(item, refs)
 
 
-def unquote(s):
-    """Remove one layer of surrounding single or double quotes if present."""
-    s = s.strip()
-    if len(s) >= 2:
-        if (s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'"):
-            return s[1:-1]
-    return s
-
-
-def iter_uses_values(path):
-    """Yield every active `uses:` value (key or `- uses:`) outside block scalars
-    and comments. Structural: indentation tracks block-scalar scope so `uses:`
-    text inside a multiline `run: |` body is not treated as a reference."""
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.read().splitlines()
-
-    # Block-scalar scope: while set, a line at greater indentation is literal
-    # body (ignored). The scope closes at the first line at or above the key's
-    # indentation (or EOF). Handles `key: |`, `key: >`, and their chomping
-    # variants (`|-`, `|+`, `>-`, `>+`, with an optional explicit indent digit).
-    block_indent = None
-    block_owner = None
-
-    for ln, raw in enumerate(lines, 1):
-        # Skip a pure blank line (also terminates a block scalar? No: blank lines
-        # inside a block scalar are body; handle by indentation rule below).
-        stripped = raw.strip()
-        if stripped == "":
-            if block_indent is not None:
-                # Blank lines inside a block scalar are still body and do not
-                # close it. They are only meaningful once a non-blank line at a
-                # lower indent appears, which the next non-blank iteration sees.
-                pass
-            continue
-
-        indent = len(raw) - len(raw.lstrip(" "))
-        content = raw[indent:]
-
-        if block_indent is not None:
-            if indent > block_indent:
-                # Literal block body: never a workflow key.
-                continue
-            block_indent = None
-            block_owner = None
-            # Fall through: this line is at/above the block key indentation and
-            # is a new YAML construct.
-
-        content = strip_comment(content).rstrip()
-        if content == "":
-            continue
-
-        # Match a mapping entry: optional sequence dash, then `key:`.
-        m = re.match(r"^(?:-\s+)?([A-Za-z0-9_.-]+)\s*:\s*(.*)$", content)
-        if not m:
-            continue
-        key, rest = m.group(1), m.group(2).strip()
-
-        if key == "uses":
-            yield unquote(rest), path, ln
-
-        # Detect the start of a block scalar on any key (e.g. `run: |`).
-        if re.search(r"[|>][+-]?[0-9]?$", rest):
-            block_indent = indent
-            block_owner = key
-
-
-def validate_ref(value, path, ln):
+def validate_ref(value):
+    if not isinstance(value, str):
+        return False
     if value.startswith("./"):
         return True  # local repository action, exempt
     if "@" not in value:
-        sys.stderr.write(f"{path}:{ln}: action has no ref: {value}\n")
         return False
     ref = value.rsplit("@", 1)[1]
-    if not re.fullmatch(r"[0-9a-fA-F]{40}", ref):
-        sys.stderr.write(
-            f"{path}:{ln}: action ref is not a full 40-hex SHA: {value}\n"
-        )
-        return False
-    return True
+    return bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref))
 
 
 files = find_workflow_files(workflow_dir)
@@ -155,8 +100,24 @@ if not files:
 
 bad = False
 for wf in files:
-    for value, path, ln in iter_uses_values(wf):
-        if not validate_ref(value, path, ln):
+    try:
+        with open(wf, "r", encoding="utf-8", errors="replace") as f:
+            doc = yaml.safe_load(f.read())
+    except yaml.YAMLError as e:
+        sys.stderr.write(f"{wf}: invalid YAML: {e}\n")
+        bad = True
+        continue
+
+    refs = []
+    walk_and_validate(doc, refs)
+    # A workflow with no `uses:` references is valid: there is nothing to pin,
+    # so the invariant holds vacuously. (Only an absence of workflow FILES is a
+    # failure, enforced below.)
+    for value in refs:
+        if not validate_ref(value):
+            sys.stderr.write(
+                f"{wf}: action ref is not a full 40-hex SHA: {value!r}\n"
+            )
             bad = True
 
 if bad:
