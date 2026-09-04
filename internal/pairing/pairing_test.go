@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
 
 func TestUnpairClearsStateAfterServerRevocation(t *testing.T) {

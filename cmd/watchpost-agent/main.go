@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	agentassets "github.com/watchpost-ops/watchpost-agent"
-	"github.com/watchpost-ops/watchpost-agent/internal/app"
-	"github.com/watchpost-ops/watchpost-agent/internal/auth"
-	"github.com/watchpost-ops/watchpost-agent/internal/pairing"
-	"github.com/watchpost-ops/watchpost-agent/internal/service"
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
-	"github.com/watchpost-ops/watchpost-agent/internal/telemetry"
+	agentassets "github.com/watchpost-cv/watchpost-agent"
+	"github.com/watchpost-cv/watchpost-agent/internal/app"
+	"github.com/watchpost-cv/watchpost-agent/internal/auth"
+	"github.com/watchpost-cv/watchpost-agent/internal/pairing"
+	"github.com/watchpost-cv/watchpost-agent/internal/service"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/telemetry"
 )
 
 var version = "0.1.0"

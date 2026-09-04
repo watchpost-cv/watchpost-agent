@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
 
 type Sample struct {

@@ -14,8 +14,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/watchpost-ops/watchpost-agent/internal/auth"
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/auth"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
 
 func TestUnpairedStatusAndSecurityHeaders(t *testing.T) {

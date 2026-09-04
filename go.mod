@@ -1,4 +1,4 @@
-module github.com/watchpost-ops/watchpost-agent
+module github.com/watchpost-cv/watchpost-agent
 
 go 1.25.0
 

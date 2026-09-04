@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
-	"github.com/watchpost-ops/watchpost-agent/internal/telemetry"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/telemetry"
 )
 
 type Client struct {

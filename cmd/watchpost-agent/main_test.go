@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/watchpost-ops/watchpost-agent/internal/app"
-	"github.com/watchpost-ops/watchpost-agent/internal/service"
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/app"
+	"github.com/watchpost-cv/watchpost-agent/internal/service"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
 
 // captureStderr runs f while capturing os.Stderr, returning the captured text
@@ -303,10 +303,10 @@ func TestRunServiceInstallRejectsFlagsForNonInstallCommands(t *testing.T) {
 
 func TestServiceLifecycleSuccessGrammar(t *testing.T) {
 	want := map[string]string{
-		"start": "watchpost-agent.service started.",
-		"stop": "watchpost-agent.service stopped.",
+		"start":   "watchpost-agent.service started.",
+		"stop":    "watchpost-agent.service stopped.",
 		"restart": "watchpost-agent.service restarted.",
-		"enable": "watchpost-agent.service enabled.",
+		"enable":  "watchpost-agent.service enabled.",
 		"disable": "watchpost-agent.service disabled.",
 	}
 	for verb, expected := range want {

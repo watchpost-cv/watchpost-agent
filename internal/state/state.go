@@ -35,7 +35,7 @@ type LocalAuth struct {
 	Accounts     []Account      `json:"accounts,omitempty"`
 	Audit        []AuditEntry   `json:"audit,omitempty"`
 	Bootstrap    BootstrapToken `json:"bootstrap_token,omitempty"`
-	Sessions     []AuthSession   `json:"sessions,omitempty"`
+	Sessions     []AuthSession  `json:"sessions,omitempty"`
 }
 
 // AuthSession stores only a hash of the browser token. Sessions survive

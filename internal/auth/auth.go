@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
 
 // ErrAuditPersistence reports that a security event could not be recorded

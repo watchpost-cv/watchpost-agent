@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/watchpost-ops/watchpost-agent/internal/auth"
-	"github.com/watchpost-ops/watchpost-agent/internal/pairing"
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/auth"
+	"github.com/watchpost-cv/watchpost-agent/internal/pairing"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
 
 // Options carries remote-management security configuration. Loopback binding

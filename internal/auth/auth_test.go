@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/watchpost-ops/watchpost-agent/internal/state"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
 
 func TestSetupLoginAndSession(t *testing.T) {
