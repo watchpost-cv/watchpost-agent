@@ -32,7 +32,7 @@ go build -o watchpost-agent ./cmd/watchpost-agent
 Release archives are produced with:
 
 ```sh
-./packaging/build-release.sh v0.1.0
+./packaging/build-release.sh v0.1.1
 ```
 
 The public installer defaults to `~/.local/bin`; pass `--system` as root for
