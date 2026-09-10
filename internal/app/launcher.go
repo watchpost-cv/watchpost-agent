@@ -17,6 +17,20 @@ func (a *App) launcherRoot(static http.Handler) http.Handler {
 			return
 		}
 		if r.URL.Query().Has("config") {
+			cookie, err := r.Cookie("watchpost_agent_session")
+			if err != nil {
+				corelauncher.WriteAccessError(w, http.StatusUnauthorized, "Watchpost Agent", "W")
+				return
+			}
+			session, ok := a.auth.Authenticate(cookie.Value)
+			if !ok {
+				corelauncher.WriteAccessError(w, http.StatusUnauthorized, "Watchpost Agent", "W")
+				return
+			}
+			if session.User.Role != "admin" {
+				corelauncher.WriteAccessError(w, http.StatusForbidden, "Watchpost Agent", "W")
+				return
+			}
 			a.serveLauncher(static, w, r)
 			return
 		}

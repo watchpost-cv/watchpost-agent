@@ -46,6 +46,19 @@ func TestUnpairedStatusAndSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestLauncherConfigRequiresAuthenticationWithoutRenderingControls(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "agent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
+	w := httptest.NewRecorder()
+	New(store, "test", fs.FS(assets), Options{}).Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/?config", nil))
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "Authentication required") || strings.Contains(w.Body.String(), "Current instances") {
+		t.Fatalf("config denial: %d %q", w.Code, w.Body.String())
+	}
+}
+
 func loginForRole(t *testing.T, handler http.Handler, email, password string) (*http.Cookie, string) {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"email":"`+email+`","password":"`+password+`"}`))
