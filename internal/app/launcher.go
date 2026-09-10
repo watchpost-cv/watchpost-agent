@@ -17,12 +17,6 @@ func (a *App) launcherRoot(static http.Handler) http.Handler {
 			return
 		}
 		if r.URL.Query().Has("config") {
-			cookie, err := r.Cookie("watchpost_agent_session")
-			session, ok := a.auth.Authenticate(cookieValue(cookie, err))
-			if !ok || session.User.Role != "admin" {
-				http.Redirect(w, r, "/app/?return=%2F%3Fconfig", http.StatusFound)
-				return
-			}
 			a.serveLauncher(static, w, r)
 			return
 		}
@@ -41,13 +35,6 @@ func (a *App) launcherRoot(static http.Handler) http.Handler {
 			a.serveLauncher(static, w, r)
 		}
 	})
-}
-
-func cookieValue(cookie *http.Cookie, err error) string {
-	if err != nil || cookie == nil {
-		return ""
-	}
-	return cookie.Value
 }
 
 func (a *App) serveLauncher(static http.Handler, w http.ResponseWriter, r *http.Request) {
