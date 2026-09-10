@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	corelauncher "github.com/gantry-tools/gantry-core/launcher"
 )
 
 const Version = 1
@@ -129,15 +131,16 @@ func (c CollectorConfig) Validate() error {
 }
 
 type State struct {
-	Version        int             `json:"version"`
-	InstallationID string          `json:"installation_id"`
-	CreatedAt      time.Time       `json:"created_at"`
-	Connection     Connection      `json:"connection"`
-	PendingPairing PendingPairing  `json:"pending_pairing"`
-	NextSequence   int64           `json:"next_sequence"`
-	Collectors     CollectorConfig `json:"collectors"`
-	Delivery       DeliveryState   `json:"delivery"`
-	LocalAuth      LocalAuth       `json:"local_auth"`
+	Version        int                     `json:"version"`
+	InstallationID string                  `json:"installation_id"`
+	CreatedAt      time.Time               `json:"created_at"`
+	Connection     Connection              `json:"connection"`
+	PendingPairing PendingPairing          `json:"pending_pairing"`
+	NextSequence   int64                   `json:"next_sequence"`
+	Collectors     CollectorConfig         `json:"collectors"`
+	Delivery       DeliveryState           `json:"delivery"`
+	LocalAuth      LocalAuth               `json:"local_auth"`
+	Launcher       []corelauncher.Instance `json:"launcher_instances,omitempty"`
 }
 
 type Store struct {
@@ -220,6 +223,7 @@ func (s *Store) cloneData() State {
 		next.Delivery.Queue[index] = json.RawMessage(copy)
 	}
 	next.Collectors.Filesystems = append([]string(nil), src.Collectors.Filesystems...)
+	next.Launcher = append([]corelauncher.Instance(nil), src.Launcher...)
 	return next
 }
 

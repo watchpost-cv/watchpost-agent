@@ -67,7 +67,17 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/accounts", a.require("admin", a.createAccount))
 	mux.HandleFunc("POST /api/v1/accounts/{id}/revoke-sessions", a.require("admin", a.revokeAccountSessions))
 	mux.HandleFunc("GET /api/v1/audit", a.require("admin", a.audit))
-	mux.Handle("/", http.FileServer(http.FS(a.assets)))
+	mux.HandleFunc("GET /api/launcher/instances", a.launcherInstances)
+	mux.HandleFunc("PUT /api/launcher/config", a.require("admin", a.launcherConfig))
+	static := http.FileServer(http.FS(a.assets))
+	mux.Handle("/launcher.css", static)
+	mux.Handle("/launcher.js", static)
+	mux.Handle("/assets/", static)
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/app/", http.StatusPermanentRedirect)
+	})
+	mux.Handle("/app/", http.StripPrefix("/app", static))
+	mux.Handle("/", a.launcherRoot(static))
 	return headers(mux)
 }
 
