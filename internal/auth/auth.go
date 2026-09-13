@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/watchpost-cv/watchpost-agent/internal/state"
 	coreauth "github.com/gantry-tools/gantry-core/auth"
+	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
 
 // ErrAuditPersistence reports that a security event could not be recorded

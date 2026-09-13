@@ -72,11 +72,25 @@ func (a *App) Handler() http.Handler {
 	static := http.FileServer(http.FS(a.assets))
 	mux.Handle("/launcher.css", static)
 	mux.Handle("/launcher.js", static)
+	mux.Handle("/manage.css", static)
+	mux.Handle("/manage.js", static)
 	mux.Handle("/assets/", static)
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/app/", http.StatusPermanentRedirect)
 	})
 	mux.Handle("/app/", http.StripPrefix("/app", static))
+	mux.HandleFunc("/manage", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/manage/", http.StatusPermanentRedirect)
+	})
+	mux.HandleFunc("/manage/", a.require("admin", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manage/" {
+			http.NotFound(w, r)
+			return
+		}
+		clone := r.Clone(r.Context())
+		clone.URL.Path = "/manage.html"
+		static.ServeHTTP(w, clone)
+	}))
 	mux.Handle("/", a.launcherRoot(static))
 	return headers(mux)
 }
