@@ -95,7 +95,7 @@ jobs:
           sudo python3 -c 'import json; p="/var/lib/watchpost-agent/agent.json"; d=json.load(open(p)); d["local_auth"]={"password_hash":"obsolete"}; open(p,"w").write(json.dumps(d))'
           sudo chown watchpost-agent:watchpost-agent "$DATA/agent.json"
           sudo /tmp/wpa reset --auth --confirm "WATCHPOST-AGENT AUTH"
-          test "$(stat -c %U "$DATA/agent.json")" = watchpost-agent || exit 1
+          test "$(sudo stat -c %U "$DATA/agent.json")" = watchpost-agent || exit 1
           sudo /tmp/wpa service start
           wait_healthz
           # Full recovery remains usable when the state envelope itself is
@@ -104,7 +104,7 @@ jobs:
           printf '%s\n' 'invalid state' | sudo tee "$DATA/agent.json" >/dev/null
           sudo chown watchpost-agent:watchpost-agent "$DATA/agent.json"
           sudo /tmp/wpa reset --all --confirm "WATCHPOST-AGENT ALL"
-          test "$(stat -c %U "$DATA/agent.json")" = watchpost-agent || exit 1
+          test "$(sudo stat -c %U "$DATA/agent.json")" = watchpost-agent || exit 1
           sudo /tmp/wpa service start
           wait_healthz
           sudo /tmp/wpa service disable
