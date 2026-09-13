@@ -1,6 +1,4 @@
-github.com/gantry-tools/gantry-core v0.0.0-20260910212209-8a07a82a8d30 h1:YQKdhW9jq7dHxYm2d6kuv1wIFryIfYLBQireiP82QPQ=
-github.com/gantry-tools/gantry-core v0.0.0-20260910212209-8a07a82a8d30/go.mod h1:PJCXWKDYXvPVDeJ6kT8hHPjiBNZ8sx3ug/kLYsf8was=
-github.com/gantry-tools/gantry-core v0.0.0-20260913034742-3ff87c89ddb6 h1:4EmgmqHrbWBckKoCTc/5+okffAV7kugFcT6wQREGEVA=
-github.com/gantry-tools/gantry-core v0.0.0-20260913034742-3ff87c89ddb6/go.mod h1:PJCXWKDYXvPVDeJ6kT8hHPjiBNZ8sx3ug/kLYsf8was=
+github.com/gantry-tools/gantry-core v0.1.0 h1:UDMTbgUqim4nzAUajdfvh77XDStGhMGZZn1htg6Pl4E=
+github.com/gantry-tools/gantry-core v0.1.0/go.mod h1:PJCXWKDYXvPVDeJ6kT8hHPjiBNZ8sx3ug/kLYsf8was=
 golang.org/x/sys v0.28.0 h1:Fksou7UEQUWlKvIdsqzJmUmCX3cZuD2+P3XyyzwMhlA=
 golang.org/x/sys v0.28.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
