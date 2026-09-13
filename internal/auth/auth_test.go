@@ -275,7 +275,7 @@ func TestConcurrentSetupWithBootstrapTokenCreatesOneAdministrator(t *testing.T) 
 	}
 }
 
-func TestPasswordHashesUseVersionedPBKDF2(t *testing.T) {
+func TestPasswordHashesUseCanonicalGantryFormat(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
 	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
@@ -286,8 +286,8 @@ func TestPasswordHashesUseVersionedPBKDF2(t *testing.T) {
 		t.Fatalf("accounts=%d", len(snapshot.LocalAuth.Accounts))
 	}
 	account := snapshot.LocalAuth.Accounts[0]
-	if !strings.HasPrefix(account.PasswordHash, "pbkdf2$210000$") {
-		t.Fatalf("password hash is not versioned PBKDF2: %q", account.PasswordHash)
+	if !strings.HasPrefix(account.PasswordHash, "pbkdf2-sha256$310000$") {
+		t.Fatalf("password hash is not canonical Gantry PBKDF2: %q", account.PasswordHash)
 	}
 	if session, err := m.Login("admin@local", "correct-horse-battery"); err != nil || session.User.Role != "admin" {
 		t.Fatalf("PBKDF2 login failed: %v", err)

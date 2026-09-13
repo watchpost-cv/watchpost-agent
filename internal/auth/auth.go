@@ -2,21 +2,19 @@ package auth
 
 import (
 	"context"
-	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/watchpost-cv/watchpost-agent/internal/state"
+	coreauth "github.com/gantry-tools/gantry-core/auth"
 )
 
 // ErrAuditPersistence reports that a security event could not be recorded
@@ -27,18 +25,10 @@ const MinimumPasswordLength = 7
 
 // passwordIterations is the PBKDF2-HMAC-SHA256 work factor used for local
 // account password hashes, matching the central server's established KDF.
-const passwordIterations = 210000
-
 // Derived-key and work-factor bounds for verifyPassword. A stored hash must
 // use the expected algorithm, an acceptable bounded work factor, and exactly
 // the expected derived-key length; empty, truncated, oversized or excessively
 // expensive encodings are rejected before PBKDF2 runs.
-const (
-	minVerifyIterations = 10000
-	maxVerifyIterations = 10000000
-	keyLength           = 32
-)
-
 type contextKey struct{}
 
 // Session carries the authenticated local account.
@@ -427,11 +417,7 @@ func FromContext(ctx context.Context) (Session, bool) {
 // hashPassword derives a versioned PBKDF2-HMAC-SHA256 hash. The iteration
 // count is embedded so future work-factor changes remain verifiable.
 func hashPassword(password, salt string) (string, error) {
-	key, err := pbkdf2.Key[hash.Hash](sha256.New, password, []byte(salt), passwordIterations, 32)
-	if err != nil {
-		return "", err
-	}
-	return "pbkdf2$" + strconv.Itoa(passwordIterations) + "$" + hex.EncodeToString(key), nil
+	return coreauth.HashPassword(password)
 }
 
 // verifyPassword checks a versioned hash. Legacy unversioned hashes from the
@@ -440,23 +426,7 @@ func hashPassword(password, salt string) (string, error) {
 // out-of-bound work factors and unexpected derived-key lengths are rejected
 // before any PBKDF2 work is performed.
 func verifyPassword(password, salt, encoded string) bool {
-	parts := strings.SplitN(encoded, "$", 3)
-	if len(parts) != 3 || parts[0] != "pbkdf2" {
-		return false
-	}
-	iterations, err := strconv.Atoi(parts[1])
-	if err != nil || iterations < minVerifyIterations || iterations > maxVerifyIterations {
-		return false
-	}
-	expected, err := hex.DecodeString(parts[2])
-	if err != nil || len(expected) != keyLength {
-		return false
-	}
-	key, err := pbkdf2.Key[hash.Hash](sha256.New, password, []byte(salt), iterations, len(expected))
-	if err != nil {
-		return false
-	}
-	return subtle.ConstantTimeCompare(key, expected) == 1
+	return coreauth.VerifyPassword(encoded, password)
 }
 
 func token(size int) (string, error) {
