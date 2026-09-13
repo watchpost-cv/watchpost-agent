@@ -16,9 +16,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gantry-tools/gantry-core/automation"
 	agentassets "github.com/watchpost-cv/watchpost-agent"
 	"github.com/watchpost-cv/watchpost-agent/internal/app"
 	"github.com/watchpost-cv/watchpost-agent/internal/auth"
+	"github.com/watchpost-cv/watchpost-agent/internal/operations"
 	"github.com/watchpost-cv/watchpost-agent/internal/pairing"
 	"github.com/watchpost-cv/watchpost-agent/internal/service"
 	"github.com/watchpost-cv/watchpost-agent/internal/state"
@@ -40,6 +42,9 @@ func main() {
 	// configuration is unhealthy, so dispatch before any runtime config load.
 	if len(os.Args) > 1 && os.Args[1] == "service" {
 		os.Exit(runServiceCommand(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && functionalCLIResource(os.Args[1]) {
+		os.Exit(automation.Run(os.Args[1:], operations.Contracts, automation.Options{Program: "watchpost-agent", DefaultURL: "http://127.0.0.1:7335", CookieName: "watchpost_agent_session", CSRFHeader: "X-Watchpost-Agent-CSRF", CSRFFields: []string{"csrf_token"}, SessionInfoPath: "/api/v1/bootstrap"}))
 	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "watchpost-agent:", err)
@@ -321,6 +326,15 @@ func lifecycleErr(m service.Manager, paths service.Paths, verb string) error {
 		return m.Disable(paths)
 	}
 	return fmt.Errorf("unknown lifecycle verb")
+}
+
+func functionalCLIResource(resource string) bool {
+	for _, c := range operations.Contracts {
+		if c.CLI != nil && c.CLI.Implemented && c.CLI.Resource == resource {
+			return true
+		}
+	}
+	return false
 }
 
 func run(arguments []string) error {

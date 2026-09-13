@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "project": "watchpost-agent",
+  "operations": [
+    {
+      "operation": "watchpost-agent.accounts.create",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/accounts",
+      "cli": "accounts create",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.admin",
+      "input_schema": "watchpost-agent.accounts.create.request.v1",
+      "output_schema": "watchpost-agent.accounts.create.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.accounts.list",
+      "website": true,
+      "method": "GET",
+      "route": "/api/v1/accounts",
+      "cli": "accounts list",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.admin",
+      "output_schema": "watchpost-agent.accounts.list.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.accounts.revoke-sessions",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/accounts/{id}/revoke-sessions",
+      "cli": "accounts revoke-sessions",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.admin",
+      "input_schema": "watchpost-agent.accounts.revoke-sessions.request.v1",
+      "output_schema": "watchpost-agent.accounts.revoke-sessions.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.agent.reset",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/reset",
+      "cli": "agent reset",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.admin",
+      "input_schema": "watchpost-agent.agent.reset.request.v1",
+      "output_schema": "watchpost-agent.agent.reset.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.audit.list",
+      "website": true,
+      "method": "GET",
+      "route": "/api/v1/audit",
+      "cli": "audit list",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.admin",
+      "output_schema": "watchpost-agent.audit.list.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.auth.bootstrap",
+      "website": true,
+      "method": "GET",
+      "route": "/api/v1/bootstrap",
+      "cli": "auth bootstrap",
+      "cli_observed": true,
+      "boundary": "public",
+      "output_schema": "watchpost-agent.auth.bootstrap.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.auth.login",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/login",
+      "cli": "auth login",
+      "cli_observed": true,
+      "boundary": "public",
+      "input_schema": "watchpost-agent.auth.login.request.v1",
+      "output_schema": "watchpost-agent.auth.login.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.auth.logout",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/logout",
+      "cli": "auth logout",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.viewer",
+      "input_schema": "watchpost-agent.auth.logout.request.v1",
+      "output_schema": "watchpost-agent.auth.logout.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.auth.password.update",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/me/password",
+      "cli": "auth-password update",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.viewer",
+      "input_schema": "watchpost-agent.auth.password.update.request.v1",
+      "output_schema": "watchpost-agent.auth.password.update.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.auth.setup",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/setup",
+      "cli": "auth setup",
+      "cli_observed": true,
+      "boundary": "public",
+      "input_schema": "watchpost-agent.auth.setup.request.v1",
+      "output_schema": "watchpost-agent.auth.setup.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.collectors.list",
+      "website": true,
+      "method": "GET",
+      "route": "/api/v1/collectors",
+      "cli": "collectors list",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.viewer",
+      "output_schema": "watchpost-agent.collectors.list.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.collectors.update",
+      "website": true,
+      "method": "PUT",
+      "route": "/api/v1/collectors",
+      "cli": "collectors update",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.technician",
+      "input_schema": "watchpost-agent.collectors.update.request.v1",
+      "output_schema": "watchpost-agent.collectors.update.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.connection.rotate",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/rotate",
+      "cli": "connection rotate",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.admin",
+      "input_schema": "watchpost-agent.connection.rotate.request.v1",
+      "output_schema": "watchpost-agent.connection.rotate.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.connection.unpair",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/unpair",
+      "cli": "connection unpair",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.admin",
+      "input_schema": "watchpost-agent.connection.unpair.request.v1",
+      "output_schema": "watchpost-agent.connection.unpair.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.health.get",
+      "website": false,
+      "method": "GET",
+      "route": "/healthz",
+      "cli": "health get",
+      "cli_observed": true,
+      "boundary": "public",
+      "output_schema": "watchpost-agent.health.get.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.launcher.config.update",
+      "website": true,
+      "method": "PUT",
+      "route": "/api/launcher/config",
+      "cli": "launcher-config update",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.admin",
+      "input_schema": "watchpost-agent.launcher.config.update.request.v1",
+      "output_schema": "watchpost-agent.launcher.config.update.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.launcher.instances.list",
+      "website": true,
+      "method": "GET",
+      "route": "/api/launcher/instances",
+      "cli": "launcher-instances list",
+      "cli_observed": true,
+      "boundary": "public",
+      "output_schema": "watchpost-agent.launcher.instances.list.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.pairing.poll",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/pairing/poll",
+      "cli": "pairing poll",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.technician",
+      "input_schema": "watchpost-agent.pairing.poll.request.v1",
+      "output_schema": "watchpost-agent.pairing.poll.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.pairing.request",
+      "website": true,
+      "method": "POST",
+      "route": "/api/v1/pairing/request",
+      "cli": "pairing request",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.technician",
+      "input_schema": "watchpost-agent.pairing.request.request.v1",
+      "output_schema": "watchpost-agent.pairing.request.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.ready.get",
+      "website": false,
+      "method": "GET",
+      "route": "/readyz",
+      "cli": "ready get",
+      "cli_observed": true,
+      "boundary": "public",
+      "output_schema": "watchpost-agent.ready.get.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    },
+    {
+      "operation": "watchpost-agent.status.get",
+      "website": true,
+      "method": "GET",
+      "route": "/api/v1/status",
+      "cli": "status get",
+      "cli_observed": true,
+      "boundary": "capability",
+      "permission": "watchpost-agent.role.viewer",
+      "output_schema": "watchpost-agent.status.get.response.v1",
+      "tests": [
+        "internal/app/app_test.go"
+      ]
+    }
+  ]
+}
