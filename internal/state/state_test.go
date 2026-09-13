@@ -96,6 +96,52 @@ func TestUnpairAndResetAreDistinct(t *testing.T) {
 	}
 }
 
+func TestRecoverFileBypassesInvalidAuthentication(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantID := store.Snapshot().InstallationID
+	var raw map[string]any
+	data, _ := os.ReadFile(path)
+	if err = json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["local_auth"] = map[string]any{"password_hash": "obsolete-hash"}
+	data, _ = json.Marshal(raw)
+	if err = os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(path); err == nil {
+		t.Fatal("ordinary open accepted incompatible authentication")
+	}
+	if err = RecoverFile(path, true); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := recovered.Snapshot()
+	if got.InstallationID != wantID || len(got.LocalAuth.Accounts.Accounts) != 0 {
+		t.Fatal("authentication recovery changed the installation or retained accounts")
+	}
+}
+
+func TestRecoverFileAllReplacesInvalidState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	if err := os.WriteFile(path, []byte("not valid JSON"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverFile(path, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err != nil {
+		t.Fatalf("full recovery did not create valid state: %v", err)
+	}
+}
+
 // breakSaves makes the next state save fail by replacing the state file with a
 // directory, so the atomic rename cannot complete.
 func breakSaves(t *testing.T, path string) {

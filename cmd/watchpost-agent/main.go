@@ -436,6 +436,9 @@ func localCommand(action string, arguments []string) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected local command arguments")
 	}
+	if action == "reset" {
+		return resetLocalState(*dataDir, *resetAuth, *resetAll, confirm)
+	}
 	store, err := state.Open(filepath.Join(*dataDir, "agent.json"))
 	if err != nil {
 		return err
@@ -522,41 +525,70 @@ func localCommand(action string, arguments []string) error {
 		}
 		fmt.Println("Post-scoped credential rotated atomically.")
 		return nil
-	case "reset":
-		if *resetAuth == *resetAll {
-			return fmt.Errorf("select exactly one of --auth or --all")
-		}
-		want := "WATCHPOST-AGENT AUTH"
-		if *resetAll {
-			want = "WATCHPOST-AGENT ALL"
-		}
-		if *confirm == "" {
-			fmt.Fprintf(os.Stderr, "Type %q to continue: ", want)
-			entered, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-			*confirm = strings.TrimSpace(entered)
-		}
-		if *confirm != want {
-			return fmt.Errorf("confirmation did not match; nothing changed")
-		}
-		backup := filepath.Join(*dataDir, "agent.reset-"+time.Now().UTC().Format("20060102T150405Z")+".json")
-		original, readErr := os.ReadFile(filepath.Join(*dataDir, "agent.json"))
-		if readErr == nil {
-			if writeErr := os.WriteFile(backup, original, 0600); writeErr != nil {
-				return writeErr
-			}
-		}
-		if *resetAuth {
-			err = store.ResetAuth()
-		} else {
-			err = store.Reset(store.Snapshot().InstallationID)
-		}
-		if err != nil {
-			return err
-		}
-		fmt.Println("Agent reset complete. A timestamped backup was retained. Warning: a full reset does not centrally revoke a lost machine; revoke it in Watchpost.")
-		return nil
 	}
 	return fmt.Errorf("unknown local action")
+}
+
+func resetLocalState(dataDir string, resetAuth, resetAll bool, confirm *string) error {
+	if resetAuth == resetAll {
+		return fmt.Errorf("select exactly one of --auth or --all")
+	}
+	want := "WATCHPOST-AGENT AUTH"
+	if resetAll {
+		want = "WATCHPOST-AGENT ALL"
+	}
+	if *confirm == "" {
+		fmt.Fprintf(os.Stderr, "Type %q to continue: ", want)
+		entered, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		*confirm = strings.TrimSpace(entered)
+	}
+	if *confirm != want {
+		return fmt.Errorf("confirmation did not match; nothing changed")
+	}
+	statePath := filepath.Join(dataDir, "agent.json")
+	original, readErr := os.ReadFile(statePath)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return readErr
+	}
+	var originalInfo os.FileInfo
+	if readErr == nil {
+		originalInfo, readErr = os.Stat(statePath)
+		if readErr != nil {
+			return readErr
+		}
+		backup := filepath.Join(dataDir, "agent.reset-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".json")
+		if err := os.WriteFile(backup, original, 0600); err != nil {
+			return err
+		}
+	}
+	ownerInfo := originalInfo
+	if ownerInfo == nil {
+		ownerInfo, readErr = os.Stat(dataDir)
+		if readErr != nil {
+			return readErr
+		}
+	}
+	if err := state.RecoverFile(statePath, resetAuth); err != nil {
+		return err
+	}
+	if ownerInfo != nil {
+		if err := restoreFileOwner(statePath, ownerInfo); err != nil {
+			if originalInfo != nil {
+				if rollbackErr := os.WriteFile(statePath, original, originalInfo.Mode().Perm()); rollbackErr == nil {
+					_ = restoreFileOwner(statePath, ownerInfo)
+				}
+			} else {
+				_ = os.Remove(statePath)
+			}
+			return fmt.Errorf("cannot preserve agent state ownership: %w", err)
+		}
+	}
+	if resetAuth {
+		fmt.Println("Agent authentication reset complete. A timestamped backup was retained.")
+	} else {
+		fmt.Println("Agent full reset complete. A timestamped backup was retained. Warning: a full reset does not centrally revoke a lost machine; revoke it in Watchpost.")
+	}
+	return nil
 }
 
 func defaultDataDir() string {

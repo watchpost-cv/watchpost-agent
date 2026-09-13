@@ -278,6 +278,47 @@ func (s *Store) ResetAuth() error {
 	return s.Update(func(value *State) error { value.LocalAuth = defaultLocalAuth(); return nil })
 }
 
+// RecoverFile resets state without first opening and validating the local
+// authentication model. This keeps the recovery command usable when an older
+// or damaged authentication payload is the reason normal Open fails.
+func RecoverFile(path string, authOnly bool) error {
+	if path == "" {
+		return errors.New("state path required")
+	}
+	var current State
+	data, err := os.ReadFile(path)
+	if err == nil {
+		if json.Unmarshal(data, &current) != nil || current.Version != Version || current.InstallationID == "" {
+			if authOnly {
+				return errors.New("cannot reset only authentication because the agent state envelope is invalid; use reset --all")
+			}
+			current = State{}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	} else if authOnly {
+		return errors.New("cannot reset authentication because agent state does not exist; use reset --all")
+	}
+
+	var next State
+	if authOnly {
+		next = current
+		next.LocalAuth = defaultLocalAuth()
+	} else {
+		id := current.InstallationID
+		created := current.CreatedAt
+		if id == "" {
+			id, err = installationID()
+			if err != nil {
+				return err
+			}
+			created = time.Now().UTC()
+		}
+		next = State{Version: Version, InstallationID: id, CreatedAt: created, Collectors: DefaultCollectorConfig(), NextSequence: 1, LocalAuth: defaultLocalAuth()}
+	}
+	return (&Store{path: path}).saveState(next)
+}
+
 func (s *Store) saveState(value State) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err

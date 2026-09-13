@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -375,5 +376,72 @@ func TestServiceLifecycleSuccessGrammar(t *testing.T) {
 		if got := serviceLifecycleSuccess(verb); got != expected {
 			t.Fatalf("%s message = %q, want %q", verb, got, expected)
 		}
+	}
+}
+
+func TestResetAuthRecoversIncompatibleAuthenticationState(t *testing.T) {
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, "agent.json")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantID := store.Snapshot().InstallationID
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err = json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["local_auth"] = map[string]any{"password_hash": "obsolete-hash"}
+	data, _ = json.Marshal(raw)
+	if err = os.WriteFile(path, data, 0640); err != nil {
+		t.Fatal(err)
+	}
+	confirmation := "WATCHPOST-AGENT AUTH"
+	if err = resetLocalState(dataDir, true, false, &confirmation); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Snapshot().InstallationID != wantID {
+		t.Fatal("auth reset changed installation identity")
+	}
+	if backups, _ := filepath.Glob(filepath.Join(dataDir, "agent.reset-*.json")); len(backups) != 1 {
+		t.Fatalf("backups = %d, want 1", len(backups))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("reset state mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestResetAllRecoversCorruptState(t *testing.T) {
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, "agent.json")
+	if err := os.WriteFile(path, []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	confirmation := "WATCHPOST-AGENT ALL"
+	if err := resetLocalState(dataDir, false, true, &confirmation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Open(path); err != nil {
+		t.Fatalf("full reset left invalid state: %v", err)
+	}
+	backups, _ := filepath.Glob(filepath.Join(dataDir, "agent.reset-*.json"))
+	if len(backups) != 1 {
+		t.Fatalf("backups = %d, want 1", len(backups))
+	}
+	got, err := os.ReadFile(backups[0])
+	if err != nil || string(got) != "broken" {
+		t.Fatalf("backup = %q, %v", got, err)
 	}
 }
