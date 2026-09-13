@@ -158,6 +158,7 @@ func (m *Manager) GenerateBootstrapToken(lifetime time.Duration) (string, error)
 }
 
 func (m *Manager) SetupRequired() bool {
+	_ = m.model.Reload()
 	return m.model.Empty()
 }
 
@@ -173,6 +174,9 @@ func (m *Manager) Setup(email, password, setupToken string) error {
 	email = NormalizeEmail(email)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.model.Reload(); err != nil {
+		return err
+	}
 	if m.bootstrapTokenRequired {
 		bootstrap := m.state.Snapshot().LocalAuth.Bootstrap
 		if bootstrap.Consumed || !time.Now().Before(bootstrap.ExpiresAt) || subtle.ConstantTimeCompare([]byte(tokenHash(setupToken)), []byte(bootstrap.Hash)) != 1 {
@@ -206,6 +210,9 @@ func (m *Manager) Login(email, password string) (Session, error) {
 	m.mu.Unlock()
 	if blocked {
 		return Session{}, errors.New("login temporarily throttled")
+	}
+	if err := m.model.Reload(); err != nil {
+		return Session{}, err
 	}
 	account, identity, valid := m.model.AuthenticatePassword(email, password)
 	if valid {
@@ -367,6 +374,9 @@ func (m *Manager) CreateAccount(actor, email, password, role string) (Account, e
 	if role == "admin" {
 		roleID = "administrator"
 	}
+	if err := m.model.Reload(); err != nil {
+		return Account{}, err
+	}
 	created, err := m.model.CreateAccount(email, email, password, []string{roleID})
 	if err != nil {
 		return Account{}, err
@@ -378,6 +388,7 @@ func (m *Manager) CreateAccount(actor, email, password, role string) (Account, e
 }
 
 func (m *Manager) ListAccounts() []Account {
+	_ = m.model.Reload()
 	items := []Account{}
 	for _, account := range m.model.Accounts() {
 		items = append(items, accountView(account))
