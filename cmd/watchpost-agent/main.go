@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -427,6 +428,8 @@ func localCommand(action string, arguments []string) error {
 	uptime := flags.Bool("uptime", true, "collect uptime")
 	filesystems := flags.String("filesystems", "/", "comma-separated absolute filesystem paths")
 	confirm := flags.String("confirm", "", "installation ID confirmation for reset")
+	resetAuth := flags.Bool("auth", false, "reset local accounts and sessions")
+	resetAll := flags.Bool("all", false, "reset all local agent state")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -520,13 +523,37 @@ func localCommand(action string, arguments []string) error {
 		fmt.Println("Post-scoped credential rotated atomically.")
 		return nil
 	case "reset":
-		if *confirm == "" {
-			return fmt.Errorf("--confirm with the installation ID is required")
+		if *resetAuth == *resetAll {
+			return fmt.Errorf("select exactly one of --auth or --all")
 		}
-		if err := store.Reset(*confirm); err != nil {
+		want := "WATCHPOST-AGENT AUTH"
+		if *resetAll {
+			want = "WATCHPOST-AGENT ALL"
+		}
+		if *confirm == "" {
+			fmt.Fprintf(os.Stderr, "Type %q to continue: ", want)
+			entered, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			*confirm = strings.TrimSpace(entered)
+		}
+		if *confirm != want {
+			return fmt.Errorf("confirmation did not match; nothing changed")
+		}
+		backup := filepath.Join(*dataDir, "agent.reset-"+time.Now().UTC().Format("20060102T150405Z")+".json")
+		original, readErr := os.ReadFile(filepath.Join(*dataDir, "agent.json"))
+		if readErr == nil {
+			if writeErr := os.WriteFile(backup, original, 0600); writeErr != nil {
+				return writeErr
+			}
+		}
+		if *resetAuth {
+			err = store.ResetAuth()
+		} else {
+			err = store.Reset(store.Snapshot().InstallationID)
+		}
+		if err != nil {
 			return err
 		}
-		fmt.Println("Agent reset. Warning: this does not revoke the connection centrally; an administrator must revoke it in Watchpost if this machine was lost.")
+		fmt.Println("Agent reset complete. A timestamped backup was retained. Warning: a full reset does not centrally revoke a lost machine; revoke it in Watchpost.")
 		return nil
 	}
 	return fmt.Errorf("unknown local action")

@@ -272,6 +272,12 @@ func (s *Store) Reset(confirm string) error {
 	return nil
 }
 
+// ResetAuth clears only local accounts and sessions. Pairing, collector
+// configuration, queued evidence and installation identity are preserved.
+func (s *Store) ResetAuth() error {
+	return s.Update(func(value *State) error { value.LocalAuth = defaultLocalAuth(); return nil })
+}
+
 func (s *Store) saveState(value State) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err

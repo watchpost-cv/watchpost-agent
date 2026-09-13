@@ -273,3 +273,5 @@ Rotate the post-scoped credential from either the lifecycle panel or CLI:
 
 Moving an installation to another post is deliberately an unpair/new-approval
 journey. Archiving or deleting a post never silently moves remote authority.
+
+For unattended setup and management, use `setup` with email/password files, `info --json`, `configure`, `pair`, `pair-status`, `rotate` and `unpair`. Destructive recovery is explicit: `reset --auth --confirm "WATCHPOST-AGENT AUTH"` preserves pairing and collector state, while `reset --all --confirm "WATCHPOST-AGENT ALL"` returns local state to first run and does not centrally revoke a lost installation. Timestamped backups are retained.
