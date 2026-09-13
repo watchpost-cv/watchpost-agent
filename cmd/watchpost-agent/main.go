@@ -25,7 +25,7 @@ import (
 	"github.com/watchpost-cv/watchpost-agent/internal/telemetry"
 )
 
-var version = "0.1.1"
+var version = "0.1.2"
 
 // newServiceManager and servicePaths are test seams. The production defaults
 // operate the real machine-service manager and canonical system paths; tests
