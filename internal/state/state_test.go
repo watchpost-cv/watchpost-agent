@@ -6,7 +6,17 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
+
+	coreauth "github.com/gantry-tools/gantry-core/auth"
 )
+
+func canonicalTestAccount(id, email, hash, role string) coreauth.Account {
+	return coreauth.Account{
+		ID: id, DisplayName: email, Enabled: true, Roles: []string{role}, CreatedAt: time.Now().UTC(),
+		Identities: []coreauth.Identity{{ID: "id_" + id, Type: "password", Username: email, Email: email, PasswordHash: hash, Enabled: true}},
+	}
+}
 
 func TestCorruptStateFailsClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.json")
@@ -62,7 +72,7 @@ func TestUnpairAndResetAreDistinct(t *testing.T) {
 	id := store.Snapshot().InstallationID
 	if err = store.Update(func(value *State) error {
 		value.Connection = Connection{Credential: "secret", PostID: "post"}
-		value.LocalAuth = LocalAuth{PasswordHash: "hash"}
+		value.LocalAuth.Audit = []AuditEntry{{Action: "keep"}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -71,7 +81,7 @@ func TestUnpairAndResetAreDistinct(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := store.Snapshot()
-	if after.Connection.Credential != "" || after.LocalAuth.PasswordHash == "" {
+	if after.Connection.Credential != "" || len(after.LocalAuth.Audit) != 1 {
 		t.Fatal("unpair crossed local auth boundary")
 	}
 	if store.Reset("wrong") == nil {
@@ -81,7 +91,7 @@ func TestUnpairAndResetAreDistinct(t *testing.T) {
 		t.Fatal(err)
 	}
 	after = store.Snapshot()
-	if after.LocalAuth.PasswordHash != "" || after.InstallationID != id {
+	if len(after.LocalAuth.Accounts.Accounts) != 0 || after.InstallationID != id {
 		t.Fatal("reset did not preserve installation identity boundary")
 	}
 }
@@ -106,7 +116,7 @@ func TestFailedSaveLeavesInMemoryAndDiskUnchanged(t *testing.T) {
 	}
 	seed := func() {
 		if err := store.Update(func(value *State) error {
-			value.LocalAuth.Accounts = []Account{{ID: "a1", Email: "admin@local", Role: "admin", Salt: "salt", PasswordHash: "pbkdf2$210000$aa"}}
+			value.LocalAuth.Accounts.Accounts = []coreauth.Account{canonicalTestAccount("a1", "admin@local", "pbkdf2-sha256$310000$aa$aa", "administrator")}
 			value.LocalAuth.Audit = []AuditEntry{{At: "t", Actor: "admin@local", Action: "setup", Detail: "first administrator created"}}
 			return nil
 		}); err != nil {
@@ -118,24 +128,24 @@ func TestFailedSaveLeavesInMemoryAndDiskUnchanged(t *testing.T) {
 
 	// In-place element mutation (password change) must not corrupt shared state.
 	if err := store.Update(func(value *State) error {
-		value.LocalAuth.Accounts[0].PasswordHash = "pbkdf2$210000$bb"
+		value.LocalAuth.Accounts.Accounts[0].Identities[0].PasswordHash = "pbkdf2-sha256$310000$bb$bb"
 		return nil
 	}); err == nil {
 		t.Fatal("update with broken save succeeded")
 	}
-	if got := store.Snapshot().LocalAuth.Accounts[0].PasswordHash; got != "pbkdf2$210000$aa" {
+	if got := store.Snapshot().LocalAuth.Accounts.Accounts[0].Identities[0].PasswordHash; got != "pbkdf2-sha256$310000$aa$aa" {
 		t.Fatalf("in-memory password mutated on failed save: %q", got)
 	}
 
 	// Account creation append must not leak.
 	if err := store.Update(func(value *State) error {
-		value.LocalAuth.Accounts = append(value.LocalAuth.Accounts, Account{ID: "a2", Email: "op@local", Role: "operator"})
+		value.LocalAuth.Accounts.Accounts = append(value.LocalAuth.Accounts.Accounts, canonicalTestAccount("a2", "op@local", "pbkdf2-sha256$310000$cc$cc", "viewer"))
 		return nil
 	}); err == nil {
 		t.Fatal("account append with broken save succeeded")
 	}
-	if len(store.Snapshot().LocalAuth.Accounts) != 1 {
-		t.Fatalf("in-memory account list changed on failed save: %d", len(store.Snapshot().LocalAuth.Accounts))
+	if len(store.Snapshot().LocalAuth.Accounts.Accounts) != 1 {
+		t.Fatalf("in-memory account list changed on failed save: %d", len(store.Snapshot().LocalAuth.Accounts.Accounts))
 	}
 
 	// Audit append must not leak.
@@ -192,14 +202,14 @@ func TestFailedSaveLeavesDiskFileUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.Update(func(value *State) error {
-		value.LocalAuth.Accounts = []Account{{ID: "a1", Email: "admin@local", Role: "admin", Salt: "salt", PasswordHash: "pbkdf2$210000$aa"}}
+		value.LocalAuth.Accounts.Accounts = []coreauth.Account{canonicalTestAccount("a1", "admin@local", "pbkdf2-sha256$310000$aa$aa", "administrator")}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	breakSaves(t, path)
 	if err := store.Update(func(value *State) error {
-		value.LocalAuth.Accounts[0].PasswordHash = "pbkdf2$210000$bb"
+		value.LocalAuth.Accounts.Accounts[0].Identities[0].PasswordHash = "pbkdf2-sha256$310000$bb$bb"
 		return nil
 	}); err == nil {
 		t.Fatal("update with broken save succeeded")

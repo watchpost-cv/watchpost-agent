@@ -282,18 +282,19 @@ func TestPasswordHashesUseCanonicalGantryFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := store.Snapshot()
-	if len(snapshot.LocalAuth.Accounts) != 1 {
-		t.Fatalf("accounts=%d", len(snapshot.LocalAuth.Accounts))
+	if len(snapshot.LocalAuth.Accounts.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(snapshot.LocalAuth.Accounts.Accounts))
 	}
-	account := snapshot.LocalAuth.Accounts[0]
-	if !strings.HasPrefix(account.PasswordHash, "pbkdf2-sha256$310000$") {
-		t.Fatalf("password hash is not canonical Gantry PBKDF2: %q", account.PasswordHash)
+	account := snapshot.LocalAuth.Accounts.Accounts[0]
+	passwordHash := account.Identities[0].PasswordHash
+	if !strings.HasPrefix(passwordHash, "pbkdf2-sha256$310000$") {
+		t.Fatalf("password hash is not canonical Gantry PBKDF2: %q", passwordHash)
 	}
 	if session, err := m.Login("admin@local", "correct-horse-battery"); err != nil || session.User.Role != "admin" {
 		t.Fatalf("PBKDF2 login failed: %v", err)
 	}
 	// A legacy custom iterated-SHA-256 hash must fail closed, forcing re-setup.
-	if verifyPassword("correct-horse-battery", account.Salt, "deadbeef") {
+	if verifyPassword("correct-horse-battery", "", "deadbeef") {
 		t.Fatal("legacy unversioned hash verified")
 	}
 }
@@ -361,7 +362,7 @@ func TestFailedAuditSaveRollsBackAccountCreation(t *testing.T) {
 	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
-	beforeAccounts := len(store.Snapshot().LocalAuth.Accounts)
+	beforeAccounts := len(store.Snapshot().LocalAuth.Accounts.Accounts)
 	beforeAudit := len(store.Snapshot().LocalAuth.Audit)
 	// Replace the state file with a directory so the next save fails.
 	if err := os.Remove(path); err != nil {
@@ -374,8 +375,8 @@ func TestFailedAuditSaveRollsBackAccountCreation(t *testing.T) {
 		t.Fatal("account creation with broken save succeeded")
 	}
 	snapshot := store.Snapshot()
-	if len(snapshot.LocalAuth.Accounts) != beforeAccounts {
-		t.Fatalf("account list changed on failed save: %d", len(snapshot.LocalAuth.Accounts))
+	if len(snapshot.LocalAuth.Accounts.Accounts) != beforeAccounts {
+		t.Fatalf("account list changed on failed save: %d", len(snapshot.LocalAuth.Accounts.Accounts))
 	}
 	if len(snapshot.LocalAuth.Audit) != beforeAudit {
 		t.Fatalf("audit changed on failed save: %d", len(snapshot.LocalAuth.Audit))
@@ -388,39 +389,39 @@ func TestVerifyPasswordRejectsMalformedAndBoundedEncodings(t *testing.T) {
 	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
-	account := store.Snapshot().LocalAuth.Accounts[0]
-	salt := account.Salt
-	if !verifyPassword("correct-horse-battery", salt, account.PasswordHash) {
+	account := store.Snapshot().LocalAuth.Accounts.Accounts[0]
+	passwordHash := account.Identities[0].PasswordHash
+	if !verifyPassword("correct-horse-battery", "", passwordHash) {
 		t.Fatal("valid hash rejected")
 	}
-	good := strings.SplitN(account.PasswordHash, "$", 3)
 	// Empty and truncated payloads.
-	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$") {
+	if verifyPassword("correct-horse-battery", "", "pbkdf2-sha256$310000$$") {
 		t.Fatal("empty derived key accepted")
 	}
-	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$aa") {
+	if verifyPassword("correct-horse-battery", "", "pbkdf2-sha256$310000$aa$aa") {
 		t.Fatal("truncated derived key accepted")
 	}
 	// Oversized derived key (33+ decoded bytes).
-	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$"+strings.Repeat("aa", 33)) {
+	if verifyPassword("correct-horse-battery", "", "pbkdf2-sha256$310000$"+strings.Repeat("aa", 16)+"$"+strings.Repeat("aa", 33)) {
 		t.Fatal("oversized derived key accepted")
 	}
 	// Out-of-bound work factors.
 	for _, iterations := range []int{0, 1, 9999, 10000001, 1000000000} {
-		bad := "pbkdf2$" + strconv.Itoa(iterations) + "$" + good[2]
-		if verifyPassword("correct-horse-battery", salt, bad) {
+		parts := strings.Split(passwordHash, "$")
+		bad := "pbkdf2-sha256$" + strconv.Itoa(iterations) + "$" + parts[2] + "$" + parts[3]
+		if verifyPassword("correct-horse-battery", "", bad) {
 			t.Fatalf("out-of-bound work factor %d accepted", iterations)
 		}
 	}
 	// Wrong algorithm prefix and non-hex payload.
-	if verifyPassword("correct-horse-battery", salt, "sha256$210000$"+good[2]) {
+	if verifyPassword("correct-horse-battery", "", strings.Replace(passwordHash, "pbkdf2-sha256", "sha256", 1)) {
 		t.Fatal("wrong algorithm accepted")
 	}
-	if verifyPassword("correct-horse-battery", salt, "pbkdf2$210000$not-hex!") {
+	if verifyPassword("correct-horse-battery", "", "pbkdf2-sha256$310000$not-hex!$aaaa") {
 		t.Fatal("non-hex derived key accepted")
 	}
 	// A wrong password with an otherwise valid hash must still fail.
-	if verifyPassword("wrong-password", salt, account.PasswordHash) {
+	if verifyPassword("wrong-password", "", passwordHash) {
 		t.Fatal("wrong password verified")
 	}
 }

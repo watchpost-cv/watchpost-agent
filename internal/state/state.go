@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	coreauth "github.com/gantry-tools/gantry-core/auth"
 	corelauncher "github.com/gantry-tools/gantry-core/launcher"
 )
 
@@ -32,21 +33,56 @@ type PendingPairing struct {
 }
 
 type LocalAuth struct {
-	Salt         string         `json:"salt,omitempty"`
-	PasswordHash string         `json:"password_hash,omitempty"`
-	Accounts     []Account      `json:"accounts,omitempty"`
-	Audit        []AuditEntry   `json:"audit,omitempty"`
-	Bootstrap    BootstrapToken `json:"bootstrap_token,omitempty"`
-	Sessions     []AuthSession  `json:"sessions,omitempty"`
+	Accounts  coreauth.AccountsFile `json:"accounts"`
+	Roles     coreauth.RolesFile    `json:"roles"`
+	Audit     []AuditEntry          `json:"audit,omitempty"`
+	Bootstrap BootstrapToken        `json:"bootstrap_token,omitempty"`
+	Sessions  []AuthSession         `json:"sessions,omitempty"`
+}
+
+func defaultLocalAuth() LocalAuth {
+	return LocalAuth{
+		Accounts: coreauth.AccountsFile{Version: 1, Accounts: []coreauth.Account{}},
+		Roles: coreauth.RolesFile{Version: 1, Roles: []coreauth.Role{
+			{ID: "administrator", Name: "Administrator", Capabilities: []string{"*"}, BuiltIn: true},
+			{ID: "technician", Name: "Technician", Capabilities: []string{"agent.read", "agent.manage"}, BuiltIn: true},
+			{ID: "viewer", Name: "Viewer", Capabilities: []string{"agent.read"}, BuiltIn: true},
+		}},
+	}
+}
+
+func validateLocalAuth(value LocalAuth) error {
+	return coreauth.ValidateAccounts(value.Accounts, value.Roles, coreauth.AccountPolicy{
+		SchemaVersion: 1,
+		ProductName:   "Watchpost Agent",
+		KnownCapability: func(key string) bool {
+			return key == "agent.read" || key == "agent.manage"
+		},
+	})
+}
+
+func cloneAccounts(values []coreauth.Account) []coreauth.Account {
+	data, _ := json.Marshal(values)
+	var cloned []coreauth.Account
+	_ = json.Unmarshal(data, &cloned)
+	return cloned
+}
+
+func cloneRoles(values []coreauth.Role) []coreauth.Role {
+	data, _ := json.Marshal(values)
+	var cloned []coreauth.Role
+	_ = json.Unmarshal(data, &cloned)
+	return cloned
 }
 
 // AuthSession stores only a hash of the browser token. Sessions survive
 // service restarts without writing bearer credentials to disk.
 type AuthSession struct {
-	TokenHash string    `json:"token_hash"`
-	CSRF      string    `json:"csrf"`
-	ExpiresAt time.Time `json:"expires_at"`
-	UserID    string    `json:"user_id"`
+	TokenHash  string    `json:"token_hash"`
+	CSRF       string    `json:"csrf"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	AccountID  string    `json:"account_id"`
+	IdentityID string    `json:"identity_id"`
 }
 
 // BootstrapToken gates first-administrator setup when agent management is
@@ -56,17 +92,6 @@ type BootstrapToken struct {
 	Hash      string    `json:"hash,omitempty"`
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	Consumed  bool      `json:"consumed,omitempty"`
-}
-
-// Account is a local administrator/technician/viewer account. Only the first
-// administrator is created by setup; the administrator manages the rest.
-type Account struct {
-	ID           string `json:"id"`
-	Email        string `json:"email"`
-	Salt         string `json:"salt"`
-	PasswordHash string `json:"password_hash"`
-	Role         string `json:"role"`
-	CreatedAt    string `json:"created_at"`
 }
 
 // AuditEntry records an attributed local state change. The list is bounded to
@@ -159,12 +184,8 @@ func Open(path string) (*Store, error) {
 		if json.Unmarshal(data, &s.data) != nil || s.data.Version != Version || s.data.InstallationID == "" {
 			return nil, errors.New("invalid agent state")
 		}
-		// Migrate the legacy single-admin form into the account list.
-		if s.data.LocalAuth.PasswordHash != "" && len(s.data.LocalAuth.Accounts) == 0 {
-			s.data.LocalAuth.Accounts = []Account{{ID: "admin", Email: "admin@local", Salt: s.data.LocalAuth.Salt, PasswordHash: s.data.LocalAuth.PasswordHash, Role: "admin", CreatedAt: s.data.CreatedAt.Format(time.RFC3339Nano)}}
-			if err = s.saveLocked(); err != nil {
-				return nil, err
-			}
+		if err := validateLocalAuth(s.data.LocalAuth); err != nil {
+			return nil, errors.New("invalid local authentication state")
 		}
 		if s.data.Collectors.IntervalSeconds == 0 {
 			s.data.Collectors = DefaultCollectorConfig()
@@ -181,7 +202,7 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.data = State{Version: Version, InstallationID: id, CreatedAt: time.Now().UTC(), Collectors: DefaultCollectorConfig()}
+	s.data = State{Version: Version, InstallationID: id, CreatedAt: time.Now().UTC(), Collectors: DefaultCollectorConfig(), LocalAuth: defaultLocalAuth()}
 	if err = s.saveLocked(); err != nil {
 		return nil, err
 	}
@@ -214,7 +235,8 @@ func (s *Store) Update(update func(*State) error) error {
 func (s *Store) cloneData() State {
 	src := s.data
 	next := src
-	next.LocalAuth.Accounts = append([]Account(nil), src.LocalAuth.Accounts...)
+	next.LocalAuth.Accounts.Accounts = cloneAccounts(src.LocalAuth.Accounts.Accounts)
+	next.LocalAuth.Roles.Roles = cloneRoles(src.LocalAuth.Roles.Roles)
 	next.LocalAuth.Audit = append([]AuditEntry(nil), src.LocalAuth.Audit...)
 	next.LocalAuth.Sessions = append([]AuthSession(nil), src.LocalAuth.Sessions...)
 	next.Delivery.Queue = make([]json.RawMessage, len(src.Delivery.Queue))
@@ -242,7 +264,7 @@ func (s *Store) Reset(confirm string) error {
 	if confirm != s.data.InstallationID {
 		return errors.New("installation ID confirmation does not match")
 	}
-	next := State{Version: Version, InstallationID: s.data.InstallationID, CreatedAt: s.data.CreatedAt, Collectors: DefaultCollectorConfig(), NextSequence: 1}
+	next := State{Version: Version, InstallationID: s.data.InstallationID, CreatedAt: s.data.CreatedAt, Collectors: DefaultCollectorConfig(), NextSequence: 1, LocalAuth: defaultLocalAuth()}
 	if err := s.saveState(next); err != nil {
 		return err
 	}

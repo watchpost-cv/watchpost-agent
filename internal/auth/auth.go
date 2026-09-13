@@ -52,6 +52,7 @@ type sessionRecord struct {
 
 type Manager struct {
 	state    *state.Store
+	model    *coreauth.Model
 	mu       sync.Mutex
 	sessions map[string]sessionRecord
 	failures []time.Time
@@ -60,15 +61,69 @@ type Manager struct {
 	bootstrapTokenRequired bool
 }
 
+type accountPersistence struct{ state *state.Store }
+
+func (p accountPersistence) LoadAccounts() (coreauth.AccountsFile, error) {
+	return p.state.Snapshot().LocalAuth.Accounts, nil
+}
+func (p accountPersistence) LoadRoles() (coreauth.RolesFile, error) {
+	return p.state.Snapshot().LocalAuth.Roles, nil
+}
+func (p accountPersistence) SaveAccounts(value coreauth.AccountsFile) error {
+	return p.state.Update(func(current *state.State) error {
+		current.LocalAuth.Accounts = value
+		return nil
+	})
+}
+func (p accountPersistence) SaveRoles(value coreauth.RolesFile) error {
+	return p.state.Update(func(current *state.State) error {
+		current.LocalAuth.Roles = value
+		return nil
+	})
+}
+
+func accountPolicy() coreauth.AccountPolicy {
+	return coreauth.AccountPolicy{SchemaVersion: 1, ProductName: "Watchpost Agent", KnownCapability: func(key string) bool {
+		return key == "agent.read" || key == "agent.manage"
+	}}
+}
+
+func accountView(account coreauth.Account) Account {
+	email := account.DisplayName
+	for _, identity := range account.Identities {
+		if identity.Email != "" {
+			email = identity.Email
+			break
+		}
+		if identity.Username != "" {
+			email = identity.Username
+		}
+	}
+	role := "viewer"
+	for _, assigned := range account.Roles {
+		switch assigned {
+		case "administrator":
+			return Account{ID: account.ID, Email: email, Role: "admin"}
+		case "technician":
+			role = "technician"
+		}
+	}
+	return Account{ID: account.ID, Email: email, Role: role}
+}
+
 func New(store *state.Store) *Manager {
-	manager := &Manager{state: store, sessions: map[string]sessionRecord{}}
+	model, err := coreauth.NewModel(accountPersistence{state: store}, accountPolicy())
+	if err != nil {
+		panic(err)
+	}
+	manager := &Manager{state: store, model: model, sessions: map[string]sessionRecord{}}
 	current := store.Snapshot()
 	accounts := map[string]Account{}
-	for _, account := range current.LocalAuth.Accounts {
-		accounts[account.ID] = Account{ID: account.ID, Email: account.Email, Role: account.Role}
+	for _, account := range model.Accounts() {
+		accounts[account.ID] = accountView(account)
 	}
 	for _, session := range current.LocalAuth.Sessions {
-		if user, ok := accounts[session.UserID]; ok && time.Now().Before(session.ExpiresAt) {
+		if user, ok := accounts[session.AccountID]; ok && model.SessionPrincipalActive(session.AccountID, session.IdentityID) && time.Now().Before(session.ExpiresAt) {
 			manager.sessions[session.TokenHash] = sessionRecord{CSRF: session.CSRF, Expires: session.ExpiresAt, User: user}
 		}
 	}
@@ -103,7 +158,7 @@ func (m *Manager) GenerateBootstrapToken(lifetime time.Duration) (string, error)
 }
 
 func (m *Manager) SetupRequired() bool {
-	return len(m.state.Snapshot().LocalAuth.Accounts) == 0
+	return m.model.Empty()
 }
 
 // NormalizeEmail canonicalises an account identity. Login and account creation
@@ -116,34 +171,21 @@ func (m *Manager) Setup(email, password, setupToken string) error {
 		return errors.New("valid email and password of at least 7 characters required")
 	}
 	email = NormalizeEmail(email)
-	return m.state.Update(func(current *state.State) error {
-		if len(current.LocalAuth.Accounts) != 0 {
-			return errors.New("local setup already completed")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.bootstrapTokenRequired {
+		bootstrap := m.state.Snapshot().LocalAuth.Bootstrap
+		if bootstrap.Consumed || !time.Now().Before(bootstrap.ExpiresAt) || subtle.ConstantTimeCompare([]byte(tokenHash(setupToken)), []byte(bootstrap.Hash)) != 1 {
+			return errors.New("bootstrap token required or invalid")
 		}
-		// Bootstrap-token consumption and first-admin creation are one atomic
-		// state update: replaying a consumed or expired token fails closed.
+	}
+	if _, err := m.model.CreateInitialAdministrator(email, email, password); err != nil {
+		return err
+	}
+	return m.state.Update(func(current *state.State) error {
 		if m.bootstrapTokenRequired {
-			bootstrap := current.LocalAuth.Bootstrap
-			if bootstrap.Consumed || !time.Now().Before(bootstrap.ExpiresAt) || subtle.ConstantTimeCompare([]byte(tokenHash(setupToken)), []byte(bootstrap.Hash)) != 1 {
-				return errors.New("bootstrap token required or invalid")
-			}
 			current.LocalAuth.Bootstrap.Consumed = true
 		}
-		salt, err := token(16)
-		if err != nil {
-			return err
-		}
-		id, err := token(8)
-		if err != nil {
-			return err
-		}
-		hash, err := hashPassword(password, salt)
-		if err != nil {
-			return err
-		}
-		current.LocalAuth.Salt = salt
-		current.LocalAuth.PasswordHash = hash
-		current.LocalAuth.Accounts = []state.Account{{ID: id, Email: email, Salt: salt, PasswordHash: hash, Role: "admin", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}}
 		current.LocalAuth.AppendAudit(email, "setup", "first administrator created")
 		return nil
 	})
@@ -165,14 +207,8 @@ func (m *Manager) Login(email, password string) (Session, error) {
 	if blocked {
 		return Session{}, errors.New("login temporarily throttled")
 	}
-	configured := m.state.Snapshot().LocalAuth
-	for _, account := range configured.Accounts {
-		if account.Email != email {
-			continue
-		}
-		if !verifyPassword(password, account.Salt, account.PasswordHash) {
-			break
-		}
+	account, identity, valid := m.model.AuthenticatePassword(email, password)
+	if valid {
 		sessionToken, err := token(32)
 		if err != nil {
 			return Session{}, err
@@ -181,12 +217,12 @@ func (m *Manager) Login(email, password string) (Session, error) {
 		if err != nil {
 			return Session{}, err
 		}
-		user := Account{ID: account.ID, Email: account.Email, Role: account.Role}
+		user := accountView(account)
 		expires := time.Now().Add(24 * time.Hour)
 		hash := tokenHash(sessionToken)
 		if err := m.state.Update(func(current *state.State) error {
-			current.LocalAuth.AppendAudit(account.Email, "login", "login")
-			current.LocalAuth.Sessions = append(current.LocalAuth.Sessions, state.AuthSession{TokenHash: hash, CSRF: csrf, ExpiresAt: expires, UserID: user.ID})
+			current.LocalAuth.AppendAudit(user.Email, "login", "login")
+			current.LocalAuth.Sessions = append(current.LocalAuth.Sessions, state.AuthSession{TokenHash: hash, CSRF: csrf, ExpiresAt: expires, AccountID: account.ID, IdentityID: identity.ID})
 			return nil
 		}); err != nil {
 			return Session{}, fmt.Errorf("%w: %v", ErrAuditPersistence, err)
@@ -265,7 +301,7 @@ func (m *Manager) RevokeUserSessions(actor, accountID string) (int, error) {
 	}
 	if err := m.state.Update(func(current *state.State) error {
 		current.LocalAuth.AppendAudit(actor, "account_revoke_sessions", "account="+accountID)
-		current.LocalAuth.Sessions = filterSessions(current.LocalAuth.Sessions, func(session state.AuthSession) bool { return session.UserID == accountID })
+		current.LocalAuth.Sessions = filterSessions(current.LocalAuth.Sessions, func(session state.AuthSession) bool { return session.AccountID == accountID })
 		return nil
 	}); err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrAuditPersistence, err)
@@ -282,40 +318,32 @@ func (m *Manager) ChangePassword(accountID, currentPassword, newPassword, keepTo
 	if len(newPassword) < MinimumPasswordLength {
 		return errors.New("password must contain at least 7 characters")
 	}
-	var errOut error
 	keepHash := tokenHash(keepToken)
-	if err := m.state.Update(func(current *state.State) error {
-		for index, account := range current.LocalAuth.Accounts {
-			if account.ID != accountID {
-				continue
-			}
-			if !verifyPassword(currentPassword, account.Salt, account.PasswordHash) {
-				errOut = errors.New("current password incorrect")
-				return errOut
-			}
-			salt, err := token(16)
-			if err != nil {
-				return err
-			}
-			hash, err := hashPassword(newPassword, salt)
-			if err != nil {
-				return err
-			}
-			current.LocalAuth.Accounts[index].Salt = salt
-			current.LocalAuth.Accounts[index].PasswordHash = hash
-			current.LocalAuth.AppendAudit(account.Email, "password_change", "password rotated")
-			current.LocalAuth.Sessions = filterSessions(current.LocalAuth.Sessions, func(session state.AuthSession) bool {
-				return session.UserID == accountID && session.TokenHash != keepHash
-			})
-			return nil
+	account, found := m.model.Account(accountID)
+	if !found {
+		return errors.New("account not found")
+	}
+	var passwordIdentity coreauth.Identity
+	for _, identity := range account.Identities {
+		if identity.Type == "password" && identity.Enabled {
+			passwordIdentity = identity
+			break
 		}
-		errOut = errors.New("account not found")
-		return errOut
-	}); err != nil {
+	}
+	if passwordIdentity.ID == "" || !coreauth.VerifyPassword(passwordIdentity.PasswordHash, currentPassword) {
+		return errors.New("current password incorrect")
+	}
+	if err := m.model.SetPassword(accountID, passwordIdentity.ID, newPassword); err != nil {
 		return err
 	}
-	if errOut != nil {
-		return errOut
+	if err := m.state.Update(func(current *state.State) error {
+		current.LocalAuth.AppendAudit(accountView(account).Email, "password_change", "password rotated")
+		current.LocalAuth.Sessions = filterSessions(current.LocalAuth.Sessions, func(session state.AuthSession) bool {
+			return session.AccountID == accountID && session.TokenHash != keepHash
+		})
+		return nil
+	}); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	for token, record := range m.sessions {
@@ -335,38 +363,24 @@ func (m *Manager) CreateAccount(actor, email, password, role string) (Account, e
 	if email == "" || !strings.Contains(email, "@") || len(password) < MinimumPasswordLength || (role != "admin" && role != "technician" && role != "viewer") {
 		return Account{}, errors.New("valid email, password of at least 7 characters, and role required")
 	}
-	var created Account
-	err := m.state.Update(func(current *state.State) error {
-		for _, account := range current.LocalAuth.Accounts {
-			if account.Email == email {
-				return errors.New("account already exists")
-			}
-		}
-		salt, err := token(16)
-		if err != nil {
-			return err
-		}
-		id, err := token(8)
-		if err != nil {
-			return err
-		}
-		hash, err := hashPassword(password, salt)
-		if err != nil {
-			return err
-		}
-		current.LocalAuth.Accounts = append(current.LocalAuth.Accounts, state.Account{ID: id, Email: email, Salt: salt, PasswordHash: hash, Role: role, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
-		created = Account{ID: id, Email: email, Role: role}
-		current.LocalAuth.AppendAudit(actor, "account_create", email+" role="+role)
-		return nil
-	})
-	return created, err
+	roleID := role
+	if role == "admin" {
+		roleID = "administrator"
+	}
+	created, err := m.model.CreateAccount(email, email, password, []string{roleID})
+	if err != nil {
+		return Account{}, err
+	}
+	if err := m.persistAudit(actor, "account_create", email+" role="+role); err != nil {
+		return Account{}, err
+	}
+	return accountView(created), nil
 }
 
 func (m *Manager) ListAccounts() []Account {
-	current := m.state.Snapshot()
 	items := []Account{}
-	for _, account := range current.LocalAuth.Accounts {
-		items = append(items, Account{ID: account.ID, Email: account.Email, Role: account.Role})
+	for _, account := range m.model.Accounts() {
+		items = append(items, accountView(account))
 	}
 	return items
 }
