@@ -50,35 +50,32 @@ func Send(ctx context.Context, store *state.Store) error {
 }
 
 func enqueue(store *state.Store, current state.State) error {
-	if len(current.Delivery.Queue) >= 256 {
-		_ = store.Update(func(value *state.State) error {
-			value.Delivery.DroppedCollections++
-			value.Delivery.LastError = "delivery queue full; collection skipped"
-			return nil
-		})
-		return errors.New("delivery queue full")
-	}
-	now := time.Now().UTC()
 	values, err := snapshot(current.Collectors)
 	if err != nil {
 		return err
 	}
-	sequence := current.NextSequence
-	if sequence < 1 {
-		sequence = 1
-	}
-	samples := make([]Sample, 0, len(values))
-	for _, value := range values {
-		copy := value.value
-		samples = append(samples, Sample{Sequence: sequence, ObservedAt: now, Signal: value.signal, Value: &copy, Unit: value.unit, Quality: "good", Labels: value.labels})
-		sequence++
-	}
-	batch := Batch{Version: 1, PostID: current.Connection.PostID, CollectorID: current.InstallationID, BatchID: fmt.Sprintf("agent-%d", now.UnixNano()), SentAt: now, Samples: samples}
-	body, err := json.Marshal(batch)
-	if err != nil {
-		return err
-	}
 	return store.Update(func(value *state.State) error {
+		if len(value.Delivery.Queue) >= 256 {
+			value.Delivery.DroppedCollections++
+			value.Delivery.LastError = "delivery queue full; collection skipped"
+			return errors.New("delivery queue full")
+		}
+		now := time.Now().UTC()
+		sequence := value.NextSequence
+		if sequence < 1 {
+			sequence = 1
+		}
+		samples := make([]Sample, 0, len(values))
+		for _, metric := range values {
+			copy := metric.value
+			samples = append(samples, Sample{Sequence: sequence, ObservedAt: now, Signal: metric.signal, Value: &copy, Unit: metric.unit, Quality: "good", Labels: metric.labels})
+			sequence++
+		}
+		batch := Batch{Version: 1, PostID: current.Connection.PostID, CollectorID: current.InstallationID, BatchID: fmt.Sprintf("agent-%d", now.UnixNano()), SentAt: now, Samples: samples}
+		body, err := json.Marshal(batch)
+		if err != nil {
+			return err
+		}
 		size := len(body)
 		for _, queued := range value.Delivery.Queue {
 			size += len(queued)
@@ -103,6 +100,20 @@ func flush(ctx context.Context, store *state.Store) error {
 		var batch Batch
 		if err := json.Unmarshal(current.Delivery.Queue[0], &batch); err != nil {
 			return err
+		}
+		// A batch held past the server's 24h observation bound can never be
+		// accepted; dropping the head lets the queue converge instead of wedging
+		// behind a permanently stale batch.
+		if time.Now().UTC().Sub(batch.SentAt) > maxClockPast {
+			_ = store.Update(func(value *state.State) error {
+				if len(value.Delivery.Queue) > 0 {
+					value.Delivery.Queue = value.Delivery.Queue[1:]
+				}
+				value.Delivery.DroppedCollections++
+				value.Delivery.LastError = "dropped collection older than the server clock bound"
+				return nil
+			})
+			continue
 		}
 		body := current.Delivery.Queue[0]
 		client := &http.Client{Timeout: 10 * time.Second}
@@ -188,6 +199,10 @@ func markFailure(store *state.Store, cause error) {
 		return nil
 	})
 }
+
+// maxClockPast mirrors the Watchpost collector contract bound; a queued batch
+// older than this can never be validated by the server.
+const maxClockPast = 24 * time.Hour
 
 type metric struct {
 	signal, unit string
