@@ -119,6 +119,11 @@ func (c *Client) Poll(ctx context.Context, actor string) (Status, error) {
 			value.Connection = state.Connection{WatchpostURL: pending.WatchpostURL, PostID: result.PostID, Credential: result.Credential}
 			value.PendingPairing = state.PendingPairing{}
 			value.NextSequence = 1
+			// Buffered telemetry was queued against the previous pairing's post
+			// and sequence space; Watchpost resets the sequence counter on
+			// approval, so a stale head batch would be rejected forever and
+			// wedge the queue. Drop the old delivery state on re-pair.
+			value.Delivery = state.DeliveryState{}
 			value.LocalAuth.AppendAudit(actor, "pairing_poll", "approved post="+result.PostID)
 			return nil
 		})
