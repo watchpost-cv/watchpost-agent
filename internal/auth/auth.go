@@ -183,7 +183,7 @@ func (m *Manager) Setup(email, password, setupToken string) error {
 			return errors.New("bootstrap token required or invalid")
 		}
 	}
-	if _, err := m.model.CreateInitialAdministrator(email, email, password); err != nil {
+	if _, err := m.model.CreateInitialAdministrator(email, email, email, password); err != nil {
 		return err
 	}
 	return m.state.Update(func(current *state.State) error {
@@ -377,7 +377,7 @@ func (m *Manager) CreateAccount(actor, email, password, role string) (Account, e
 	if err := m.model.Reload(); err != nil {
 		return Account{}, err
 	}
-	created, err := m.model.CreateAccount(email, email, password, []string{roleID})
+	created, err := m.model.CreateAccount(email, email, email, password, []string{roleID})
 	if err != nil {
 		return Account{}, err
 	}
