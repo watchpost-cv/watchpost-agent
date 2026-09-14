@@ -342,6 +342,15 @@ func (s *Store) saveState(value State) error {
 	if err != nil {
 		return err
 	}
+	// The atomic-replace temp file is created owned by the invoking process.
+	// An administrative CLI invoked as root would otherwise replace agent.json
+	// with a root-owned file that the systemd service account can no longer
+	// open. Preserve the owning user/group of the data directory through the
+	// rewrite so durable state stays service-account-owned regardless of which
+	// user ran the lifecycle command.
+	if err := preserveFileOwnership(filepath.Dir(s.path), name); err != nil {
+		return err
+	}
 	return os.Rename(name, s.path)
 }
 

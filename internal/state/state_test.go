@@ -303,3 +303,32 @@ func TestConcurrentUpdatesRemainConsistent(t *testing.T) {
 		t.Fatalf("audit entries lost or duplicated: %d", len(snapshot.LocalAuth.Audit))
 	}
 }
+
+// TestStateFileModeBits asserts the durable state file is owner-only and the
+// data directory is not world-readable after a write, on every platform.
+func TestStateFileModeBits(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(s *State) error { s.Collectors.IntervalSeconds = 15; return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("agent.json mode = %04o, want 0600", got)
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("data directory mode = %04o, want 0700", got)
+	}
+}
