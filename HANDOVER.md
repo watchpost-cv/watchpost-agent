@@ -4,6 +4,17 @@
 
 Watchpost Agent follows `gantry-core/docs/CLI_API_CLUSTER_ROADMAP.md`. Phase 1 CP8 adopts the v0.1.1 contract for status, collector update and reset. Its CLI names are reserved, not marked implemented; Phase 5 must wire and runtime-observe them before executable coverage is advertised.
 
+### Durable-state ownership (ecb60ac)
+
+`ecb60ac` fixed the durable-state ownership defect: `saveState` now preserves the
+owning user/group of the data directory through the atomic replacement of
+`agent.json`, so an administrative CLI run as root no longer leaves a
+root-owned file that the `watchpost-agent` systemd account cannot open. The fix
+was **confirmed on a real VM**: a root `configure` mutation retained `0600`
+`watchpost-agent:watchpost-agent` ownership, the service restart after the root
+mutation succeeded, and a subsequent mutation caused no ownership drift. Data
+directory is `0700`; `agent.json` is `0600`.
+
 ## Frontend asset ownership
 
 Nift tracks and builds HTML pages only. CSS, JavaScript, images, icons and other
