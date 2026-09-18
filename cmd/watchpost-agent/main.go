@@ -436,6 +436,7 @@ func localCommand(action string, arguments []string) error {
 	emailFile := flags.String("email-file", "", "file containing the first local administrator email")
 	jsonOutput := flags.Bool("json", false, "print machine-readable status")
 	serverURL := flags.String("server", "", "Watchpost URL")
+	insecurePairingFlag := flags.Bool("insecure-plaintext", false, "permit pairing with a non-loopback HTTP Watchpost on a trusted private network (disables TLS confidentiality; request authentication remains)")
 	interval := flags.Int("interval", 60, "collection interval in seconds")
 	cpu := flags.Bool("cpu", true, "collect CPU utilisation")
 	memory := flags.Bool("memory", true, "collect memory utilisation")
@@ -497,7 +498,11 @@ func localCommand(action string, arguments []string) error {
 		if *serverURL == "" {
 			return fmt.Errorf("--server is required")
 		}
-		result, err := pairing.New(store, version).Request(context.Background(), *serverURL, "cli")
+		client := pairing.New(store, version)
+		if *insecurePairingFlag || os.Getenv("WATCHPOST_AGENT_INSECURE_PLAINTEXT") == "1" {
+			client.SetInsecurePlaintext(true)
+		}
+		result, err := client.Request(context.Background(), *serverURL, "cli")
 		if err != nil {
 			return err
 		}

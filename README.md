@@ -209,7 +209,21 @@ health, configure collectors and perform normal pairing and recovery tasks;
 `viewer` is read-only. Every state-changing local operation is recorded in a
 bounded local audit log visible to administrators.
 
+### Pairing transport
+
+Pairing with a Watchpost server is HTTPS by default; plain HTTP is accepted
+only for a loopback Watchpost URL. To pair with a non-loopback HTTP Watchpost
+on a trusted private network, pass `--insecure-plaintext` to the pair command
+(or set `WATCHPOST_AGENT_INSECURE_PLAINTEXT=1`). This disables TLS
+**confidentiality** only; pairing and telemetry request authentication is
+unchanged. Only use it on a network you trust.
+
+```sh
+watchpost-agent pair --server http://192.168.1.11:7334 --insecure-plaintext
+```
+
 ### Remote exposure is experimental
+
 
 The interface defaults to loopback and is not a hardened internet service.
 The ordinary fleet model keeps the UI on `127.0.0.1`: the Agent initiates

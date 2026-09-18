@@ -21,9 +21,10 @@ import (
 )
 
 type Client struct {
-	state   *state.Store
-	version string
-	http    *http.Client
+	state             *state.Store
+	version           string
+	http              *http.Client
+	insecurePlaintext bool
 }
 type Status struct {
 	State     string    `json:"state"`
@@ -36,9 +37,15 @@ func New(store *state.Store, version string) *Client {
 	return &Client{state: store, version: version, http: &http.Client{Timeout: 10 * time.Second}}
 }
 
+// SetInsecurePlaintext permits pairing with a non-loopback HTTP Watchpost when
+// the operator explicitly opts into plaintext transport on a trusted private
+// network. This disables transport confidentiality only; pairing/telemetry
+// request authentication is unchanged.
+func (c *Client) SetInsecurePlaintext(v bool) { c.insecurePlaintext = v }
+
 func (c *Client) Request(ctx context.Context, server, actor string) (Status, error) {
 	server = strings.TrimRight(server, "/")
-	if err := safeURL(server); err != nil {
+	if err := c.allowServer(server); err != nil {
 		return Status{}, err
 	}
 	secret, err := random(32)
@@ -240,7 +247,7 @@ func (c *Client) Rotate(ctx context.Context, actor string) error {
 	})
 }
 
-func safeURL(value string) error {
+func (c *Client) allowServer(value string) error {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Host == "" {
 		return errors.New("valid Watchpost URL required")
@@ -249,10 +256,10 @@ func safeURL(value string) error {
 	if parsed.Scheme == "https" {
 		return nil
 	}
-	if parsed.Scheme == "http" && (host == "localhost" || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()) {
+	if parsed.Scheme == "http" && (c.insecurePlaintext || host == "localhost" || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())) {
 		return nil
 	}
-	return errors.New("HTTPS is required except for a loopback Watchpost URL")
+	return errors.New("HTTPS is required unless insecure plaintext transport is explicitly enabled (trusted private network only)")
 }
 func random(size int) (string, error) {
 	value := make([]byte, size)

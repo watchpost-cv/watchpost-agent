@@ -88,3 +88,31 @@ func openStore(t *testing.T) *state.Store {
 	t.Cleanup(func() {})
 	return store
 }
+
+func TestPairingTransportGuard(t *testing.T) {
+	store := openStore(t)
+	client := New(store, "test")
+	// Default: non-loopback HTTP rejected; HTTPS and loopback HTTP accepted.
+	if err := client.allowServer("http://remote.example"); err == nil {
+		t.Fatal("non-loopback http accepted by default")
+	}
+	if err := client.allowServer("https://remote.example"); err != nil {
+		t.Fatalf("https rejected: %v", err)
+	}
+	if err := client.allowServer("http://127.0.0.1:9"); err != nil {
+		t.Fatalf("loopback http rejected: %v", err)
+	}
+	if err := client.allowServer("http://localhost:9"); err != nil {
+		t.Fatalf("localhost http rejected: %v", err)
+	}
+	// Explicit plaintext: non-loopback HTTP accepted.
+	client.SetInsecurePlaintext(true)
+	if err := client.allowServer("http://remote.example"); err != nil {
+		t.Fatalf("http rejected in explicit plaintext mode: %v", err)
+	}
+	// Request-level default: a remote HTTP Watchpost is rejected before any
+	// network call.
+	if _, err := New(store, "test").Request(context.Background(), "http://remote.example", "cli"); err == nil || !strings.Contains(err.Error(), "HTTPS is required") {
+		t.Fatalf("http pairing request accepted by default (err=%v)", err)
+	}
+}
