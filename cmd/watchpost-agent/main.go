@@ -407,6 +407,12 @@ func run(arguments []string) error {
 
 func deliveryLoop(ctx context.Context, store *state.Store) {
 	for {
+		// Reload agent.json so cross-process state changes (for example a
+		// pairing or rotation performed by the separate `watchpost-agent` CLI)
+		// are observed by the running service without a restart. Reload is
+		// atomic under the store lock and leaves the previous snapshot intact on
+		// a transient unreadable file, so a momentary write is tolerated.
+		_ = store.Reload()
 		interval := store.Snapshot().Collectors.IntervalSeconds
 		if interval < 15 {
 			interval = 60
