@@ -25,7 +25,7 @@ func TestUnpairedStatusAndSecurityHeaders(t *testing.T) {
 	}
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
 	handler := New(store, "test", fs.FS(assets), Options{}).Handler()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","email":"admin@local","password":"1234567"}`))
 	request.Header.Set("Origin", "http://example.com")
 	request.Host = "example.com"
 	response := httptest.NewRecorder()
@@ -83,7 +83,7 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	}
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
 	handler := New(store, "test", fs.FS(assets), Options{}).Handler()
-	setup := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"admin-pass-1"}`))
+	setup := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","email":"admin@local","password":"admin-pass-1"}`))
 	setup.Header.Set("Origin", "http://example.com")
 	setup.Host = "example.com"
 	setupRecorder := httptest.NewRecorder()
@@ -94,10 +94,10 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	adminCookie, adminCSRF := loginForRole(t, handler, "admin@local", "admin-pass-1")
 	// Create roles through the auth manager directly, then log in through the API.
 	manager := auth.New(store)
-	if _, err := manager.CreateAccount("admin@local", "tech@local", "tech-pass-1", "technician"); err != nil {
+	if _, err := manager.CreateAccount("admin@local", "tech", "tech@local", "tech-pass-1", "technician"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.CreateAccount("admin@local", "view@local", "view-pass-1", "viewer"); err != nil {
+	if _, err := manager.CreateAccount("admin@local", "view", "view@local", "view-pass-1", "viewer"); err != nil {
 		t.Fatal(err)
 	}
 	techCookie, techCSRF := loginForRole(t, handler, "tech@local", "tech-pass-1")
@@ -149,7 +149,7 @@ func TestLocalRoleCapabilityMatrix(t *testing.T) {
 	if got := post(adminCookie, adminCSRF, "/api/v1/rotate"); got != http.StatusConflict {
 		t.Fatalf("admin rotate unpaired=%d want 409", got)
 	}
-	accountBody := `{"email":"new@local","password":"role-pass-1","role":"viewer"}`
+	accountBody := `{"username":"new","email":"new@local","password":"role-pass-1","role":"viewer"}`
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/accounts", bytes.NewBufferString(accountBody))
 	request.AddCookie(adminCookie)
 	request.Header.Set("X-Watchpost-Agent-CSRF", adminCSRF)
@@ -186,7 +186,7 @@ func TestProxyOriginHandlingRequiresTrustedPeer(t *testing.T) {
 	assets := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("agent")}}
 	setupApp := func(opts Options) http.Handler {
 		manager := auth.New(store)
-		_ = manager.Setup("admin@local", "admin-pass-1", "")
+		_ = manager.Setup("admin", "admin@local", "admin-pass-1", "")
 		return New(store, "test", fs.FS(assets), opts).Handler()
 	}
 	login := func(handler http.Handler, remoteAddr, forwardedProto, forwardedHost string) int {
@@ -312,7 +312,7 @@ func TestRemoteSetupRequiresBootstrapToken(t *testing.T) {
 	if !bytes.Contains(bootRec.Body.Bytes(), []byte(`"setup_token_required":true`)) {
 		t.Fatalf("bootstrap must report token required: %s", bootRec.Body.String())
 	}
-	noToken := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
+	noToken := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","email":"admin@local","password":"1234567"}`))
 	noToken.Header.Set("Origin", "http://example.com")
 	noToken.Host = "example.com"
 	rec := httptest.NewRecorder()
@@ -320,7 +320,7 @@ func TestRemoteSetupRequiresBootstrapToken(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("setup without token=%d want 409", rec.Code)
 	}
-	withToken := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567","token":"remote-setup-token"}`))
+	withToken := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","email":"admin@local","password":"1234567","token":"remote-setup-token"}`))
 	withToken.Header.Set("Origin", "http://example.com")
 	withToken.Host = "example.com"
 	rec2 := httptest.NewRecorder()
@@ -367,7 +367,7 @@ func TestLogoutEndpointReportsAuditFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := New(store, "test", fstest.MapFS{}, Options{}).Handler()
-	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
+	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","email":"admin@local","password":"1234567"}`))
 	setupRequest.Header.Set("Origin", "http://example.com")
 	setupRequest.Host = "example.com"
 	setupResponse := httptest.NewRecorder()
@@ -408,7 +408,7 @@ func TestRevokeSessionsEndpointReportsAuditFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := New(store, "test", fstest.MapFS{}, Options{}).Handler()
-	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"email":"admin@local","password":"1234567"}`))
+	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","email":"admin@local","password":"1234567"}`))
 	setupRequest.Header.Set("Origin", "http://example.com")
 	setupRequest.Host = "example.com"
 	setupResponse := httptest.NewRecorder()

@@ -117,6 +117,7 @@ func (a *App) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
+		Username string `json:"username"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
 		Token    string `json:"token"`
@@ -124,7 +125,7 @@ func (a *App) setup(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	if err := a.auth.Setup(input.Email, input.Password, input.Token); err != nil {
+	if err := a.auth.Setup(input.Username, input.Email, input.Password, input.Token); err != nil {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 		return
 	}
@@ -507,12 +508,12 @@ func (a *App) accounts(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) createAccount(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Email, Password, Role string
+		Username, Email, Password, Role string
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	account, err := a.auth.CreateAccount(actorEmail(r), input.Email, input.Password, input.Role)
+	account, err := a.auth.CreateAccount(actorEmail(r), input.Username, input.Email, input.Password, input.Role)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return

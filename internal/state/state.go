@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -182,10 +183,10 @@ func Open(path string) (*Store, error) {
 	data, err := os.ReadFile(path)
 	if err == nil {
 		if json.Unmarshal(data, &s.data) != nil || s.data.Version != Version || s.data.InstallationID == "" {
-			return nil, errors.New("invalid agent state")
+			return nil, fmt.Errorf("agent state %s is unreadable, truncated, or from an incompatible version; run `watchpost-agent reset --all` to restore first-run state, or restore a timestamped backup", path)
 		}
 		if err := validateLocalAuth(s.data.LocalAuth); err != nil {
-			return nil, errors.New("invalid local authentication state")
+			return nil, fmt.Errorf("local authentication state in %s is invalid (%v); run `watchpost-agent reset --auth` to restore default local accounts, or `watchpost-agent reset --all`", path, err)
 		}
 		if s.data.Collectors.IntervalSeconds == 0 {
 			s.data.Collectors = DefaultCollectorConfig()

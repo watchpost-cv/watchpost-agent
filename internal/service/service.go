@@ -392,6 +392,7 @@ func renderUnitBody(paths Paths, opts Options) string {
 func buildUnit(paths Paths, opts Options) string {
 	meta := "# watchpost-agent-listen: " + opts.listener() + "\n"
 	meta += "# watchpost-agent-listen-mode: " + opts.mode() + "\n"
+	meta += "# watchpost-agent-data: " + paths.DataDir + "\n"
 	if opts.EnvFile != "" {
 		meta += "# watchpost-agent-envfile: " + opts.EnvFile + "\n"
 	}
@@ -419,6 +420,7 @@ type unitMeta struct {
 	listenMode string
 	envfile    string
 	health     string
+	data       string
 }
 
 // Meta is the exported view of a managed unit's integrity-checked metadata.
@@ -440,6 +442,27 @@ func (m Manager) ExistingMeta(paths Paths) (Meta, bool, error) {
 		return Meta{}, false, fmt.Errorf("existing unit at %s is not valid: %w", paths.Unit, err)
 	}
 	return Meta{Listen: meta.listen, ListenMode: meta.listenMode, EnvFile: meta.envfile}, true, nil
+}
+
+// InstalledDataDir returns the data directory recorded by the installed
+// managed service unit. The boolean is false when the service is not installed.
+// A present but foreign, malformed or modified unit is an error so destructive
+// CLI operations never silently target a different agent.json. An existing
+// managed unit that predates the data-dir marker is likewise an error: its
+// data directory cannot be known, so the caller must pass --data-dir explicitly
+// rather than fall back.
+func (m Manager) InstalledDataDir(paths Paths) (string, bool, error) {
+	meta, err := readManagedUnitFile(paths.Unit)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("cannot use installed service configuration: %w", err)
+	}
+	if strings.TrimSpace(meta.data) == "" {
+		return "", false, fmt.Errorf("installed service unit predates data-directory metadata; pass --data-dir explicitly")
+	}
+	return meta.data, true, nil
 }
 
 // OptionsFromMeta reconstructs the recorded options from an existing managed
@@ -488,7 +511,7 @@ func readManagedUnit(content string) (unitMeta, error) {
 		return unitMeta{}, errModified
 	}
 	meta := unitMeta{listenMode: listenModeBootstrap}
-	listenSeen, envfileSeen, healthSeen, modeSeen := 0, 0, 0, 0
+	listenSeen, envfileSeen, healthSeen, modeSeen, dataSeen := 0, 0, 0, 0, 0
 	for _, ln := range lines[2:] {
 		switch {
 		case strings.HasPrefix(ln, "# watchpost-agent-listen: "):
@@ -503,6 +526,12 @@ func readManagedUnit(content string) (unitMeta, error) {
 				return unitMeta{}, errMalformed
 			}
 			meta.listenMode = strings.TrimSpace(strings.TrimPrefix(ln, "# watchpost-agent-listen-mode: "))
+		case strings.HasPrefix(ln, "# watchpost-agent-data: "):
+			dataSeen++
+			if dataSeen > 1 {
+				return unitMeta{}, errMalformed
+			}
+			meta.data = strings.TrimSpace(strings.TrimPrefix(ln, "# watchpost-agent-data: "))
 		case strings.HasPrefix(ln, "# watchpost-agent-envfile: "):
 			envfileSeen++
 			if envfileSeen > 1 {
@@ -520,7 +549,7 @@ func readManagedUnit(content string) (unitMeta, error) {
 	if listenSeen != 1 || healthSeen != 1 || meta.listen == "" || meta.health == "" {
 		return unitMeta{}, errMalformed
 	}
-	if envfileSeen > 1 {
+	if envfileSeen > 1 || dataSeen > 1 {
 		return unitMeta{}, errMalformed
 	}
 	// Old units predating the mode marker default to bootstrap: their recorded
@@ -533,6 +562,17 @@ func readManagedUnit(content string) (unitMeta, error) {
 	}
 	if err := validateNoControl(meta.listen, "listen"); err != nil {
 		return unitMeta{}, errMalformed
+	}
+	// The data-dir marker is additive: older managed units predate it and stay
+	// valid for lifecycle operations, but destructive commands that need the
+	// installed data directory must fail closed when it is absent.
+	if dataSeen == 1 {
+		if meta.data == "" {
+			return unitMeta{}, errMalformed
+		}
+		if err := validateNoControl(meta.data, "data-dir"); err != nil {
+			return unitMeta{}, errMalformed
+		}
 	}
 	if meta.envfile != "" {
 		if err := validateNoControl(meta.envfile, "environment file"); err != nil {

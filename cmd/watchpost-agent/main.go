@@ -431,6 +431,7 @@ func localCommand(action string, arguments []string) error {
 	flags := flag.NewFlagSet("watchpost-agent "+action, flag.ContinueOnError)
 	dataDir := flags.String("data-dir", defaultDataDir(), "private agent data directory")
 	passwordFile := flags.String("password-file", "", "file containing the local UI password")
+	username := flags.String("username", "", "username for the first local administrator")
 	email := flags.String("email", "", "email address for the first local administrator")
 	emailFile := flags.String("email-file", "", "file containing the first local administrator email")
 	jsonOutput := flags.Bool("json", false, "print machine-readable status")
@@ -450,15 +451,20 @@ func localCommand(action string, arguments []string) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected local command arguments")
 	}
-	if action == "reset" {
-		return resetLocalState(*dataDir, *resetAuth, *resetAll, confirm)
+	resolvedDir, err := resolveAgentDataDir(flags, *dataDir)
+	if err != nil {
+		return err
 	}
-	store, err := state.Open(filepath.Join(*dataDir, "agent.json"))
+	if action == "reset" {
+		return resetLocalState(resolvedDir, *resetAuth, *resetAll, confirm)
+	}
+	store, err := state.Open(filepath.Join(resolvedDir, "agent.json"))
 	if err != nil {
 		return err
 	}
 	switch action {
 	case "setup":
+		username := strings.TrimSpace(*username)
 		address := *email
 		if *emailFile != "" {
 			content, err := os.ReadFile(*emailFile)
@@ -467,14 +473,14 @@ func localCommand(action string, arguments []string) error {
 			}
 			address = strings.TrimRight(string(content), "\r\n")
 		}
-		if address == "" || *passwordFile == "" {
-			return fmt.Errorf("--email (or --email-file) and --password-file are required")
+		if username == "" || address == "" || *passwordFile == "" {
+			return fmt.Errorf("--username, --email (or --email-file) and --password-file are required")
 		}
 		password, err := os.ReadFile(*passwordFile)
 		if err != nil {
 			return err
 		}
-		if err = auth.New(store).Setup(address, strings.TrimRight(string(password), "\r\n"), ""); err != nil {
+		if err = auth.New(store).Setup(username, address, strings.TrimRight(string(password), "\r\n"), ""); err != nil {
 			return err
 		}
 		fmt.Println("Local agent administrator configured.")
@@ -610,6 +616,25 @@ func defaultDataDir() string {
 		return value
 	}
 	return "/var/lib/watchpost-agent"
+}
+
+// resolveAgentDataDir applies the canonical instance-resolution precedence for
+// setup/info/reset: an explicit --data-dir wins, then WATCHPOST_AGENT_DATA_DIR,
+// then the data directory recorded by the installed managed service, then the
+// normal default. It fails closed rather than silently targeting a different
+// agent.json when the installed unit exists but cannot be used safely.
+func resolveAgentDataDir(fs *flag.FlagSet, explicit string) (string, error) {
+	dir := strings.TrimSpace(explicit)
+	if !flagProvided(fs, "data-dir") && strings.TrimSpace(os.Getenv("WATCHPOST_AGENT_DATA_DIR")) == "" {
+		installed, installedOK, installedErr := newServiceManager().InstalledDataDir(servicePaths())
+		if installedErr != nil {
+			return "", installedErr
+		}
+		if installedOK {
+			dir = installed
+		}
+	}
+	return dir, nil
 }
 
 // appOptions reads remote-management security options. Binding to a

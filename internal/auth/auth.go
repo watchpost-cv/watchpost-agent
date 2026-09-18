@@ -167,9 +167,10 @@ func (m *Manager) SetupRequired() bool {
 // accounts or resolve to the wrong one.
 func NormalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
 
-func (m *Manager) Setup(email, password, setupToken string) error {
-	if !strings.Contains(email, "@") || len(password) < MinimumPasswordLength {
-		return errors.New("valid email and password of at least 7 characters required")
+func (m *Manager) Setup(username, email, password, setupToken string) error {
+	username = strings.TrimSpace(username)
+	if username == "" || !strings.Contains(email, "@") || len(password) < MinimumPasswordLength {
+		return errors.New("valid username, email and password of at least 7 characters required")
 	}
 	email = NormalizeEmail(email)
 	m.mu.Lock()
@@ -183,7 +184,7 @@ func (m *Manager) Setup(email, password, setupToken string) error {
 			return errors.New("bootstrap token required or invalid")
 		}
 	}
-	if _, err := m.model.CreateInitialAdministrator(email, email, email, password); err != nil {
+	if _, err := m.model.CreateInitialAdministrator(username, username, email, password); err != nil {
 		return err
 	}
 	return m.state.Update(func(current *state.State) error {
@@ -365,10 +366,11 @@ func (m *Manager) ChangePassword(accountID, currentPassword, newPassword, keepTo
 // CreateAccount adds a technician or viewer account (administrator only).
 // Identities are normalized and compared case-insensitively. The authenticated
 // administrator's email is recorded as the actor in the same state save.
-func (m *Manager) CreateAccount(actor, email, password, role string) (Account, error) {
+func (m *Manager) CreateAccount(actor, username, email, password, role string) (Account, error) {
+	username = strings.TrimSpace(username)
 	email = NormalizeEmail(email)
-	if email == "" || !strings.Contains(email, "@") || len(password) < MinimumPasswordLength || (role != "admin" && role != "technician" && role != "viewer") {
-		return Account{}, errors.New("valid email, password of at least 7 characters, and role required")
+	if username == "" || email == "" || !strings.Contains(email, "@") || len(password) < MinimumPasswordLength || (role != "admin" && role != "technician" && role != "viewer") {
+		return Account{}, errors.New("valid username, email, password of at least 7 characters, and role required")
 	}
 	roleID := role
 	if role == "admin" {
@@ -377,7 +379,7 @@ func (m *Manager) CreateAccount(actor, email, password, role string) (Account, e
 	if err := m.model.Reload(); err != nil {
 		return Account{}, err
 	}
-	created, err := m.model.CreateAccount(email, email, email, password, []string{roleID})
+	created, err := m.model.CreateAccount(username, username, email, password, []string{roleID})
 	if err != nil {
 		return Account{}, err
 	}

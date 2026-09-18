@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/watchpost-cv/watchpost-agent/internal/app"
+	"github.com/watchpost-cv/watchpost-agent/internal/auth"
 	"github.com/watchpost-cv/watchpost-agent/internal/service"
 	"github.com/watchpost-cv/watchpost-agent/internal/state"
 )
@@ -376,6 +377,70 @@ func TestServiceLifecycleSuccessGrammar(t *testing.T) {
 		if got := serviceLifecycleSuccess(verb); got != expected {
 			t.Fatalf("%s message = %q, want %q", verb, got, expected)
 		}
+	}
+}
+
+func TestLocalResetUsesInstalledServiceDataDir(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "custom-data")
+	paths := service.Paths{
+		Binary:  filepath.Join(dir, "watchpost-agent"),
+		DataDir: dataDir,
+		Unit:    filepath.Join(dir, "watchpost-agent.service"),
+		System:  true,
+	}
+	unit := service.UnitOptions(paths, service.Options{Host: "127.0.0.1", Port: "7335"})
+	if err := os.WriteFile(paths.Unit, []byte(unit), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &serviceFakeRunner{script: map[string]serviceFakeResult{}}
+	m := service.Manager{Run: r.Run, Stream: r.Stream}
+	oldManager, oldPaths := newServiceManager, servicePaths
+	newServiceManager = func() service.Manager { return m }
+	servicePaths = func() service.Paths { return paths }
+	t.Cleanup(func() { newServiceManager, servicePaths = oldManager, oldPaths })
+	t.Setenv("WATCHPOST_AGENT_DATA_DIR", "")
+
+	// Seed the installed instance's state with a local administrator.
+	store, err := state.Open(filepath.Join(dataDir, "agent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.New(store).Setup("admin", "admin@example.com", "correct horse battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := store.Snapshot(); len(snapshot.LocalAuth.Accounts.Accounts) == 0 {
+		t.Fatal("setup did not create a local administrator")
+	}
+
+	// The reset must target the installed instance's data directory even though
+	// the CLI default and environment point elsewhere.
+	confirmation := "WATCHPOST-AGENT AUTH"
+	if err := localCommand("reset", []string{"--auth", "--confirm", confirmation}); err != nil {
+		t.Fatalf("reset --auth error: %v", err)
+	}
+	recovered, err := state.Open(filepath.Join(dataDir, "agent.json"))
+	if err != nil {
+		t.Fatalf("installed state unreadable after reset: %v", err)
+	}
+	if len(recovered.Snapshot().LocalAuth.Accounts.Accounts) != 0 {
+		t.Fatal("auth reset did not clear the installed instance's administrator")
+	}
+	backups, err := filepath.Glob(filepath.Join(dataDir, "agent.reset-*.json"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("auth backups = %v, err = %v; want one", backups, err)
+	}
+
+	// Full reset on the installed instance.
+	confirmation = "WATCHPOST-AGENT ALL"
+	if err := localCommand("reset", []string{"--all", "--confirm", confirmation}); err != nil {
+		t.Fatalf("reset --all error: %v", err)
+	}
+	if _, err := state.Open(filepath.Join(dataDir, "agent.json")); err != nil {
+		t.Fatalf("installed state unreadable after full reset: %v", err)
+	}
+	if backups, _ := filepath.Glob(filepath.Join(dataDir, "agent.reset-*.json")); len(backups) != 2 {
+		t.Fatalf("backup count = %d, want 2 (one per reset)", len(backups))
 	}
 }
 

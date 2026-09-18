@@ -22,10 +22,10 @@ func TestSetupLoginAndSession(t *testing.T) {
 	if !manager.SetupRequired() {
 		t.Fatal("fresh agent did not require setup")
 	}
-	if err = manager.Setup("admin@local", "short", ""); err == nil {
+	if err = manager.Setup("admin", "admin@local", "short", ""); err == nil {
 		t.Fatal("short password accepted")
 	}
-	if err = manager.Setup("admin@local", "1234567", ""); err != nil {
+	if err = manager.Setup("admin", "admin@local", "1234567", ""); err != nil {
 		t.Fatal(err)
 	}
 	if manager.SetupRequired() {
@@ -49,7 +49,7 @@ func TestSetupLoginAndSession(t *testing.T) {
 func TestSessionSurvivesManagerRestart(t *testing.T) {
 	store := openStore(t)
 	manager := New(store)
-	if err := manager.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := manager.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	session, err := manager.Login("admin@local", "correct-horse-battery")
@@ -65,20 +65,20 @@ func TestSessionSurvivesManagerRestart(t *testing.T) {
 func TestRoleCapabilities(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	admin, err := m.Login("admin@local", "correct-horse-battery")
 	if err != nil || admin.User.Role != "admin" {
 		t.Fatalf("admin login: %#v %v", admin, err)
 	}
-	if _, err := m.CreateAccount("admin@local", "tech@local", "1234567", "technician"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "tech", "tech@local", "1234567", "technician"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "view@local", "1234567", "viewer"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "view", "view@local", "1234567", "viewer"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "bad@local", "1234567", "superuser"); err == nil {
+	if _, err := m.CreateAccount("admin@local", "bad", "bad@local", "1234567", "superuser"); err == nil {
 		t.Fatal("invalid role accepted")
 	}
 	items := m.ListAccounts()
@@ -93,7 +93,7 @@ func TestRoleCapabilities(t *testing.T) {
 func TestSessionRevocationAndPasswordChange(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	session1, _ := m.Login("admin@local", "correct-horse-battery")
@@ -122,13 +122,13 @@ func TestSessionRevocationAndPasswordChange(t *testing.T) {
 func TestSharedPasswordResolvesEachEmailToOwnIdentity(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "shared-password-1", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "shared-password-1", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "tech@local", "shared-password-1", "technician"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "tech", "tech@local", "shared-password-1", "technician"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "view@local", "shared-password-1", "viewer"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "view", "view@local", "shared-password-1", "viewer"); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct{ email, role string }{
@@ -150,7 +150,7 @@ func TestSharedPasswordResolvesEachEmailToOwnIdentity(t *testing.T) {
 func TestLoginRejectsUnknownEmailAndWrongPassword(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.Login("nobody@local", "correct-horse-battery"); err == nil {
@@ -164,24 +164,40 @@ func TestLoginRejectsUnknownEmailAndWrongPassword(t *testing.T) {
 func TestDuplicateEmailRejectedCaseInsensitively(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("Admin@Local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("Admin", "Admin@Local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "admin@LOCAL", "another-password-1", "viewer"); err == nil {
+	// Distinct username but the same (case-insensitive) email must be rejected
+	// by email uniqueness, not merely by username collision.
+	if _, err := m.CreateAccount("admin@local", "another", "admin@LOCAL", "another-password-1", "viewer"); err == nil {
 		t.Fatal("duplicate normalized email accepted")
 	}
-	if _, err := m.CreateAccount("admin@local", "TECH@local", "another-password-1", "technician"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "TECH", "TECH@local", "another-password-1", "technician"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "tech@LOCAL", "another-password-1", "viewer"); err == nil {
+	if _, err := m.CreateAccount("admin@local", "other", "tech@LOCAL", "another-password-1", "viewer"); err == nil {
 		t.Fatal("duplicate normalized technician email accepted")
+	}
+}
+
+func TestUsernameLoginWorksAfterSetup(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Login("admin", "correct-horse-battery"); err != nil {
+		t.Fatalf("login by username failed: %v", err)
+	}
+	if _, err := m.Login("admin@local", "correct-horse-battery"); err != nil {
+		t.Fatalf("login by email failed: %v", err)
 	}
 }
 
 func TestLoginNormalizesEmailCase(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("Admin@Example.COM", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("Admin", "Admin@Example.COM", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	session, err := m.Login("  admin@example.com  ", "correct-horse-battery")
@@ -201,13 +217,13 @@ func TestBootstrapTokenRequiredForRemoteSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err == nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err == nil {
 		t.Fatal("setup without token succeeded")
 	}
-	if err := m.Setup("admin@local", "correct-horse-battery", "wrong-token"); err == nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", "wrong-token"); err == nil {
 		t.Fatal("setup with wrong token succeeded")
 	}
-	if err := m.Setup("admin@local", "correct-horse-battery", token); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", token); err != nil {
 		t.Fatalf("setup with token failed: %v", err)
 	}
 	// Only a hash is persisted.
@@ -216,7 +232,7 @@ func TestBootstrapTokenRequiredForRemoteSetup(t *testing.T) {
 		t.Fatal("raw token persisted instead of a hash")
 	}
 	// The consumed token cannot be replayed (setup is also complete).
-	if err := m.Setup("other@local", "correct-horse-battery", token); err == nil {
+	if err := m.Setup("other", "other@local", "correct-horse-battery", token); err == nil {
 		t.Fatal("second setup with the same token succeeded")
 	}
 }
@@ -228,7 +244,7 @@ func TestBootstrapTokenExpiryFailsClosed(t *testing.T) {
 	if err := m.StoreBootstrapToken("expired-token", time.Now().Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Setup("admin@local", "correct-horse-battery", "expired-token"); err == nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", "expired-token"); err == nil {
 		t.Fatal("setup with an expired token succeeded")
 	}
 }
@@ -239,7 +255,7 @@ func TestLoopbackSetupRemainsDirectWithoutToken(t *testing.T) {
 	if m.BootstrapTokenRequired() {
 		t.Fatal("loopback setup unexpectedly requires a token")
 	}
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatalf("direct loopback setup failed: %v", err)
 	}
 }
@@ -258,7 +274,7 @@ func TestConcurrentSetupWithBootstrapTokenCreatesOneAdministrator(t *testing.T) 
 		wg.Add(1)
 		go func(e string) {
 			defer wg.Done()
-			err := m.Setup(e, "correct-horse-battery", token)
+			err := m.Setup("admin", e, "correct-horse-battery", token)
 			results <- err == nil
 		}(email)
 	}
@@ -278,7 +294,7 @@ func TestConcurrentSetupWithBootstrapTokenCreatesOneAdministrator(t *testing.T) 
 func TestPasswordHashesUseCanonicalGantryFormat(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := store.Snapshot()
@@ -312,10 +328,10 @@ func auditEntries(store *state.Store, action string) []state.AuditEntry {
 func TestAccountCreationEmitsSingleAuditWithRealActor(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "tech@local", "1234567", "technician"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "tech", "tech@local", "1234567", "technician"); err != nil {
 		t.Fatal(err)
 	}
 	entries := auditEntries(store, "account_create")
@@ -333,10 +349,10 @@ func TestAccountCreationEmitsSingleAuditWithRealActor(t *testing.T) {
 func TestChangePasswordEmitsSingleAuditWithSelfActor(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
-	account, err := m.CreateAccount("admin@local", "tech@local", "1234567", "technician")
+	account, err := m.CreateAccount("admin@local", "tech", "tech@local", "1234567", "technician")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +375,7 @@ func TestFailedAuditSaveRollsBackAccountCreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	beforeAccounts := len(store.Snapshot().LocalAuth.Accounts.Accounts)
@@ -371,7 +387,7 @@ func TestFailedAuditSaveRollsBackAccountCreation(t *testing.T) {
 	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "op@local", "1234567", "viewer"); err == nil {
+	if _, err := m.CreateAccount("admin@local", "op", "op@local", "1234567", "viewer"); err == nil {
 		t.Fatal("account creation with broken save succeeded")
 	}
 	snapshot := store.Snapshot()
@@ -386,7 +402,7 @@ func TestFailedAuditSaveRollsBackAccountCreation(t *testing.T) {
 func TestVerifyPasswordRejectsMalformedAndBoundedEncodings(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	account := store.Snapshot().LocalAuth.Accounts.Accounts[0]
@@ -442,7 +458,7 @@ func TestLoginAuditFailureCreatesNoSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	session, err := m.Login("admin@local", "correct-horse-battery")
@@ -474,7 +490,7 @@ func TestLogoutAuditFailureLeavesSessionValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	session, err := m.Login("admin@local", "correct-horse-battery")
@@ -500,7 +516,7 @@ func TestRevokeAuditFailureLeavesSessionsValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
 	first, err := m.Login("admin@local", "correct-horse-battery")
@@ -535,10 +551,10 @@ func TestRevokeAuditFailureLeavesSessionsValid(t *testing.T) {
 func TestSuccessfulSessionEventsEmitSingleAttributedAudit(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
-	if err := m.Setup("admin@local", "correct-horse-battery", ""); err != nil {
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateAccount("admin@local", "tech@local", "1234567", "technician"); err != nil {
+	if _, err := m.CreateAccount("admin@local", "tech", "tech@local", "1234567", "technician"); err != nil {
 		t.Fatal(err)
 	}
 	adminSession, err := m.Login("admin@local", "correct-horse-battery")
