@@ -158,6 +158,11 @@ func (m *Manager) GenerateBootstrapToken(lifetime time.Duration) (string, error)
 }
 
 func (m *Manager) SetupRequired() bool {
+	// Best-effort reload of state from disk so an administrator created
+	// out-of-band (the CLI setup command) is recognised without a restart. If
+	// the on-disk state is momentarily unreadable the valid in-memory snapshot
+	// is used instead.
+	_ = m.state.Reload()
 	_ = m.model.Reload()
 	return m.model.Empty()
 }
@@ -212,6 +217,12 @@ func (m *Manager) Login(email, password string) (Session, error) {
 	if blocked {
 		return Session{}, errors.New("login temporarily throttled")
 	}
+	// Best-effort reload of state from disk so an administrator created
+	// out-of-band (the CLI setup command) can sign in without a restart. A
+	// momentarily unreadable state file falls back to the valid in-memory
+	// snapshot; the audit-write failure path below still governs broken-state
+	// behaviour.
+	_ = m.state.Reload()
 	if err := m.model.Reload(); err != nil {
 		return Session{}, err
 	}

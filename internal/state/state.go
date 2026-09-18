@@ -210,6 +210,35 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// Reload re-reads agent.json from disk so a running process observes state
+// written by another process (for example the `watchpost-agent setup` CLI)
+// without a restart. The in-memory snapshot is replaced atomically under the
+// store lock. Invalid or incompatible on-disk state is an error; the previous
+// in-memory snapshot is left untouched.
+func (s *Store) Reload() error {
+	if s.path == "" {
+		return errors.New("state path required")
+	}
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return err
+	}
+	var next State
+	if json.Unmarshal(data, &next) != nil || next.Version != Version || next.InstallationID == "" {
+		return fmt.Errorf("agent state %s is unreadable, truncated, or from an incompatible version; run `watchpost-agent reset --all` to restore first-run state, or restore a timestamped backup", s.path)
+	}
+	if err := validateLocalAuth(next.LocalAuth); err != nil {
+		return fmt.Errorf("local authentication state in %s is invalid (%v); run `watchpost-agent reset --auth` to restore default local accounts, or `watchpost-agent reset --all`", s.path, err)
+	}
+	if next.Collectors.IntervalSeconds == 0 {
+		next.Collectors = DefaultCollectorConfig()
+	}
+	s.mu.Lock()
+	s.data = next
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *Store) Snapshot() State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

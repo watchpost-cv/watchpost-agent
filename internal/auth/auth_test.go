@@ -597,3 +597,31 @@ func TestSuccessfulSessionEventsEmitSingleAttributedAudit(t *testing.T) {
 		t.Fatalf("revoke actor=%q detail=%q", revokeRows[0].Actor, revokeRows[0].Detail)
 	}
 }
+
+func TestOutOfBandSetupRecognisedWithoutRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.json")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(store)
+	if !m.SetupRequired() {
+		t.Fatal("expected setup required initially")
+	}
+	// Simulate `watchpost-agent setup` in a separate process/store writing the
+	// administrator to the same agent.json.
+	cliStore, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := New(cliStore).Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	// The running manager must observe the change without a restart.
+	if m.SetupRequired() {
+		t.Fatal("out-of-band setup not recognised without restart")
+	}
+	if _, err := m.Login("admin", "correct-horse-battery"); err != nil {
+		t.Fatalf("login by out-of-band administrator failed: %v", err)
+	}
+}
