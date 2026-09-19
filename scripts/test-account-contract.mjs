@@ -43,4 +43,12 @@ for (const [label, html] of [["public", publicHtml], ["content", contentHtml]]) 
   a(login.includes('autocomplete="username"'), label + " login identifier must keep autocomplete=username");
 }
 
+// Header Log out control stays on one line and yields gracefully for long
+// emails: no fixed pixel width, white-space:nowrap on the button, ellipsis on
+// the account name.
+const pairingCss = fs.readFileSync("public/assets/css/pairing.css", "utf8");
+a(pairingCss.includes(".topbar .account button{width:auto"), "pairing.css Log out button must not use a fixed pixel width");
+a(pairingCss.includes("white-space:nowrap"), "pairing.css Log out button must keep white-space:nowrap");
+a(pairingCss.includes("text-overflow:ellipsis"), "pairing.css account name must ellipsize for long emails");
+
 console.log("watchpost-agent account-creation contract: ok");
