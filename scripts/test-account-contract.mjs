@@ -33,4 +33,14 @@ a(/Display name|display/.test(dialog) === false, "/manage Add user dialog reques
 a(manageJs.includes("Passwords do not match."), "/manage frontend must validate password confirmation");
 a(manageJs.includes("username:f.get(\"username\")") || manageJs.includes("username:f.get('username')"), "/manage create payload must send username");
 
+// Login form (served + Nift source): the identifier field is labelled
+// "Username or email" and is a text field so usernames pass validation. The
+// backend resolves both username and email against the same identifier.
+for (const [label, html] of [["public", publicHtml], ["content", contentHtml]]) {
+  const login = html.split('<form id="login-form"')[1].split("</form>")[0];
+  a(login.includes("Username or email"), label + " login form label must say 'Username or email'");
+  a(!/type="email"/.test(login), label + " login identifier must be type=text, not type=email");
+  a(login.includes('autocomplete="username"'), label + " login identifier must keep autocomplete=username");
+}
+
 console.log("watchpost-agent account-creation contract: ok");

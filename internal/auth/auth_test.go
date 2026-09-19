@@ -161,6 +161,26 @@ func TestLoginRejectsUnknownEmailAndWrongPassword(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsWrongUsernameAndCrossedCredentials(t *testing.T) {
+	store := openStore(t)
+	m := New(store)
+	if err := m.Setup("admin", "admin@local", "correct-horse-battery", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Wrong username with the correct password must not authenticate.
+	if _, err := m.Login("nobody", "correct-horse-battery"); err == nil {
+		t.Fatal("wrong username authenticated")
+	}
+	// Correct username with the wrong password must not authenticate.
+	if _, err := m.Login("admin", "wrong-password"); err == nil {
+		t.Fatal("wrong password authenticated against username")
+	}
+	// A username that is not a valid email must still be rejected cleanly.
+	if _, err := m.Login("", "correct-horse-battery"); err == nil {
+		t.Fatal("empty identifier authenticated")
+	}
+}
+
 func TestDuplicateEmailRejectedCaseInsensitively(t *testing.T) {
 	store := openStore(t)
 	m := New(store)
